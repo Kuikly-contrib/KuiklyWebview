@@ -1,0 +1,769 @@
+<h1 id="kuiklywebview-jsbridge-技术文档">KuiklyWebView JSBridge
+技术文档</h1>
+<blockquote>
+<p>本文档基于 KuiklyWebview 项目源码分析，详细记录 WebView 与 Native
+之间的 JSBridge 通信机制。 覆盖 iOS、Android、OHOS/鸿蒙 三端实现。</p>
+</blockquote>
+<hr />
+<h2 id="目录">目录</h2>
+<ol type="1">
+<li><a href="#1-架构概览">架构概览</a></li>
+<li><a href="#2-核心原理webview-执行-js-字符串">核心原理：WebView 执行
+JS 字符串</a></li>
+<li><a href="#3-kotlin-共享层协议定义">Kotlin 共享层协议定义</a></li>
+<li><a href="#4-三端原生-webview-实现对比">三端原生 WebView
+实现对比</a></li>
+<li><a href="#5-js--native-通信机制">JS → Native 通信机制</a></li>
+<li><a href="#6-native--js-通信机制">Native → JS 通信机制</a></li>
+<li><a href="#7-native-对象如何挂载到-js-环境">Native 对象如何挂载到 JS
+环境</a></li>
+<li><a href="#8-native-处理-json-消息的流程">Native 处理 JSON
+消息的流程</a></li>
+<li><a href="#9-消息路由从-postmessage-到-handlemessage">消息路由：从
+postMessage 到 handleMessage</a></li>
+<li><a href="#10-android-javascriptinterface-反射机制详解">Android <span
+class="citation"
+data-cites="JavascriptInterface">@JavascriptInterface</span>
+反射机制详解</a></li>
+<li><a href="#11-完整调用链路总结">完整调用链路总结</a></li>
+</ol>
+<hr />
+<h2 id="架构概览">1. 架构概览</h2>
+<p>KuiklyWebView 的 JSBridge 采用 <strong>消息传递 + Promise
+回调</strong> 的设计模式，通过 Kotlin Multiplatform
+共享层统一协议定义，三端各自实现平台特有的通信通道。</p>
+<pre><code>┌─────────────────────────────────────────────────────────┐
+│                    JS 端 (WebView 页面)                   │
+│  window.KuiklyBridge.callNative(method, params) → Promise │
+│  window.KuiklyBridge._onNativeResponse(callId, result)    │
+│  window.KuiklyBridge._onNativeEvent(data)                 │
+│  window.KuiklyBridge.registerHandler(name, handler)       │
+└──────────────────┬──────────────────┬─────────────────────┘
+                   │ _postMessage()   │ evaluateJavaScript
+                   ▼                  ▲
+┌──────────────────────────────────────────────────────────┐
+│              平台消息通道（各端实现不同）                      │
+│  iOS:     webkit.messageHandlers.KuiklyNativeHandler      │
+│  Android: window.KuiklyNativeHandler (@JavascriptInterface)│
+│  OHOS:    window.KuiklyNativeHandler (javaScriptProxy)     │
+└──────────────────┬──────────────────┬─────────────────────┘
+                   │                  │
+                   ▼                  ▲
+┌──────────────────────────────────────────────────────────┐
+│                 Native 端 (KRWebViewJSBridge)              │
+│  handleMessage() → handleNativeCall()                      │
+│  nativeHandlers[method](params, callback)                  │
+│  callback.resolve(result) / callback.reject(error)         │
+└──────────────────────────────────────────────────────────┘</code></pre>
+<h3 id="关键源文件">关键源文件</h3>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>文件</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>KuiklyWebview/src/commonMain/kotlin/.../JSBridgeProtocol.kt</code></td>
+<td>Kotlin 共享层，定义协议常量、JS 注入脚本、工具方法</td>
+</tr>
+<tr>
+<td><code>KuiklyWebviewAndroid/.../KRWebViewJSBridge.kt</code></td>
+<td>Android 端 JSBridge 实现</td>
+</tr>
+<tr>
+<td><code>KuiklyWebviewAndroid/.../KRWebView.kt</code></td>
+<td>Android 端 WebView 封装（挂载 JSBridge）</td>
+</tr>
+<tr>
+<td><code>KuiklyWebviewIOS/Classes/KRWebViewJSBridge.m/.h</code></td>
+<td>iOS 端 JSBridge 实现</td>
+</tr>
+<tr>
+<td><code>KuiklyWebviewIOS/Classes/KRWebView.m</code></td>
+<td>iOS 端 WebView 封装（挂载 JSBridge）</td>
+</tr>
+<tr>
+<td><code>KuiklyWebviewOhos/.../KRWebViewJSBridge.ets</code></td>
+<td>OHOS/鸿蒙端 JSBridge 实现</td>
+</tr>
+<tr>
+<td><code>KuiklyWebviewOhos/.../KRWebView.ets</code></td>
+<td>OHOS/鸿蒙端 WebView 封装（挂载 JSBridge）</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="核心原理webview-执行-js-字符串">2. 核心原理：WebView 执行 JS
+字符串</h2>
+<p>所有平台的原生 WebView 都支持将 <strong>JS
+代码以字符串形式传入并执行</strong>。这是 JSBridge 工作的基础。</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>平台</th>
+<th>Native → JS（执行 JS 字符串）</th>
+<th>API</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>iOS</strong></td>
+<td><code>WKWebView</code></td>
+<td><code>evaluateJavaScript(_:completionHandler:)</code></td>
+</tr>
+<tr>
+<td><strong>Android</strong></td>
+<td><code>android.webkit.WebView</code></td>
+<td><code>evaluateJavascript(script, callback)</code></td>
+</tr>
+<tr>
+<td><strong>OHOS</strong></td>
+<td><code>ArkWeb WebviewController</code></td>
+<td><code>runJavaScript(script)</code></td>
+</tr>
+</tbody>
+</table>
+<p>使用场景包括： - <strong>注入 Bridge 脚本</strong>：页面加载时注入
+<code>BRIDGE_JS_CODE</code> + 平台 <code>_postMessage</code> 实现 -
+<strong>发送事件到 JS</strong>：构建 <code>_onNativeEvent(...)</code>
+脚本字符串后执行 - <strong>回调 JS Promise</strong>：构建
+<code>_onNativeResponse(callId, result, error)</code> 脚本后执行</p>
+<hr />
+<h2 id="kotlin-共享层协议定义">3. Kotlin 共享层协议定义</h2>
+<p>文件：<code>JSBridgeProtocol.kt</code></p>
+<h3 id="协议常量">3.1 协议常量</h3>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode kotlin"><code class="sourceCode kotlin"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">const</span> <span class="kw">val</span> <span class="va">BRIDGE_NAME</span> <span class="op">=</span> <span class="st">&quot;KuiklyBridge&quot;</span>              <span class="co">// JS 端 Bridge 对象名</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="kw">const</span> <span class="kw">val</span> <span class="va">NATIVE_HANDLER_NAME</span> <span class="op">=</span> <span class="st">&quot;KuiklyNativeHandler&quot;</span> <span class="co">// Native 消息处理器名</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a><span class="co">// 消息 JSON Key</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a><span class="kw">const</span> <span class="kw">val</span> <span class="va">KEY_CALL_ID</span> <span class="op">=</span> <span class="st">&quot;callId&quot;</span></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a><span class="kw">const</span> <span class="kw">val</span> <span class="va">KEY_METHOD</span> <span class="op">=</span> <span class="st">&quot;method&quot;</span></span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a><span class="kw">const</span> <span class="kw">val</span> <span class="va">KEY_PARAMS</span> <span class="op">=</span> <span class="st">&quot;params&quot;</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a><span class="kw">const</span> <span class="kw">val</span> <span class="va">KEY_TYPE</span> <span class="op">=</span> <span class="st">&quot;type&quot;</span></span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a><span class="co">// 消息类型</span></span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a><span class="kw">const</span> <span class="kw">val</span> <span class="va">TYPE_CALL</span> <span class="op">=</span> <span class="st">&quot;call&quot;</span>           <span class="co">// JS 调用 Native</span></span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a><span class="kw">const</span> <span class="kw">val</span> <span class="va">TYPE_RESPONSE</span> <span class="op">=</span> <span class="st">&quot;response&quot;</span>   <span class="co">// Native 返回结果</span></span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a><span class="kw">const</span> <span class="kw">val</span> <span class="va">TYPE_EVENT</span> <span class="op">=</span> <span class="st">&quot;event&quot;</span>         <span class="co">// Native 主动推送</span></span></code></pre></div>
+<h3 id="bridge-js-核心脚本-bridge_js_code">3.2 Bridge JS 核心脚本
+(<code>BRIDGE_JS_CODE</code>)</h3>
+<p>注入后在 <code>window.KuiklyBridge</code> 上提供以下能力：</p>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>callNative(method, params)</code></td>
+<td>JS 调用 Native，返回 Promise</td>
+</tr>
+<tr>
+<td><code>_onNativeResponse(callId, result, error)</code></td>
+<td>Native 回调 Promise</td>
+</tr>
+<tr>
+<td><code>_onNativeEvent(data)</code></td>
+<td>Native 主动推送事件</td>
+</tr>
+<tr>
+<td><code>registerHandler(name, handler)</code></td>
+<td>JS 端注册事件处理器</td>
+</tr>
+<tr>
+<td><code>_postMessage(message)</code></td>
+<td><strong>占位方法</strong>，由各平台脚本覆盖</td>
+</tr>
+</tbody>
+</table>
+<h3 id="平台-_postmessage-覆盖脚本">3.3 平台 <code>_postMessage</code>
+覆盖脚本</h3>
+<table>
+<colgroup>
+<col style="width: 23%" />
+<col style="width: 30%" />
+<col style="width: 46%" />
+</colgroup>
+<thead>
+<tr>
+<th>平台</th>
+<th>常量名</th>
+<th>JS 实际调用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>iOS</td>
+<td><code>IOS_POST_MESSAGE_JS</code></td>
+<td><code>window.webkit.messageHandlers.KuiklyNativeHandler.postMessage(message)</code></td>
+</tr>
+<tr>
+<td>Android</td>
+<td><code>ANDROID_POST_MESSAGE_JS</code></td>
+<td><code>window.KuiklyNativeHandler.postMessage(message)</code></td>
+</tr>
+<tr>
+<td>OHOS</td>
+<td><code>OHOS_POST_MESSAGE_JS</code></td>
+<td><code>window.KuiklyNativeHandler.postMessage(message)</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>策略模式应用</strong>：Bridge 核心逻辑统一，只有
+<code>_postMessage</code> 一个方法根据平台不同而不同。</p>
+</blockquote>
+<h3 id="工具方法">3.4 工具方法</h3>
+<ul>
+<li><strong><code>buildResponseScript(callId, result, error)</code></strong>：构建
+Native 回调 JS Promise 的脚本</li>
+<li><strong><code>buildEventScript(method, params)</code></strong>：构建
+Native 主动推送事件的脚本</li>
+<li><strong><code>escapeJsString(str)</code></strong>：O(n) 单次遍历转义
+JS 字符串特殊字符，覆盖反斜杠、引号、换行符、Unicode 行/段分隔符、null
+字符、<code>&lt;/script&gt;</code> 标签</li>
+</ul>
+<hr />
+<h2 id="三端原生-webview-实现对比">4. 三端原生 WebView 实现对比</h2>
+<h3 id="ios-端-wkwebview">iOS 端 (WKWebView)</h3>
+<pre class="objc"><code>// 注入 Bridge 脚本
+[self.webView evaluateJavaScript:[KRWebViewJSBridge cachedFullBridgeScript] completionHandler:nil];
+
+// 发送事件到 JS
+[self.webView evaluateJavaScript:script completionHandler:nil];</code></pre>
+<ul>
+<li>JS → Native 通道：<code>WKScriptMessageHandler</code> 协议</li>
+<li>预缓存脚本：通过 <code>dispatch_once</code> 确保只拼接一次</li>
+</ul>
+<h3 id="android-端-android.webkit.webview">Android 端
+(android.webkit.WebView)</h3>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode kotlin"><code class="sourceCode kotlin"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="co">// 注入 Bridge 脚本</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>webView<span class="op">.</span>evaluateJavascript<span class="op">(</span>CACHED_FULL_BRIDGE_SCRIPT<span class="op">,</span> <span class="kw">null</span><span class="op">)</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="co">// 发送事件到 JS</span></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>webView<span class="op">.</span>evaluateJavascript<span class="op">(</span>script<span class="op">,</span> <span class="kw">null</span><span class="op">)</span></span></code></pre></div>
+<ul>
+<li>JS → Native 通道：<code>@JavascriptInterface</code> 注解</li>
+<li>预缓存脚本：通过 <code>by lazy</code> 延迟初始化</li>
+</ul>
+<h3 id="ohos鸿蒙端-arkweb">OHOS/鸿蒙端 (ArkWeb)</h3>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode typescript"><code class="sourceCode typescript"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="co">// 注入 Bridge 脚本</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="kw">this</span><span class="op">.</span><span class="at">controller</span><span class="op">.</span><span class="fu">runJavaScript</span>(CACHED_BRIDGE_SCRIPT)<span class="op">;</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a><span class="co">// 发送事件到 JS</span></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a><span class="kw">this</span><span class="op">.</span><span class="at">controller</span><span class="op">.</span><span class="fu">runJavaScript</span>(script)<span class="op">;</span></span></code></pre></div>
+<ul>
+<li>JS → Native 通道：<code>javaScriptProxy</code> 机制</li>
+<li>通过 <code>methodList</code> 显式声明暴露的方法</li>
+</ul>
+<hr />
+<h2 id="js-native-通信机制">5. JS → Native 通信机制</h2>
+<h3 id="js-端发起调用">5.1 JS 端发起调用</h3>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode javascript"><code class="sourceCode javascript"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="co">// JS 业务代码</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a><span class="kw">const</span> result <span class="op">=</span> <span class="cf">await</span> <span class="bu">window</span><span class="op">.</span><span class="at">KuiklyBridge</span><span class="op">.</span><span class="fu">callNative</span>(<span class="st">&#39;getDeviceInfo&#39;</span><span class="op">,</span> { <span class="dt">key</span><span class="op">:</span> <span class="st">&#39;model&#39;</span> })<span class="op">;</span></span></code></pre></div>
+<h3 id="callnative-内部流程">5.2 callNative 内部流程</h3>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode javascript"><code class="sourceCode javascript"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a>callNative<span class="op">:</span> <span class="kw">function</span>(method<span class="op">,</span> params) {</span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> <span class="kw">new</span> <span class="bu">Promise</span>(<span class="kw">function</span>(resolve<span class="op">,</span> reject) {</span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>        <span class="kw">var</span> id <span class="op">=</span> <span class="st">&#39;cb_&#39;</span> <span class="op">+</span> (_callId<span class="op">++</span>)<span class="op">;</span>                         <span class="co">// ① 生成唯一 callId</span></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a>        _callbacks[id] <span class="op">=</span> { <span class="dt">resolve</span><span class="op">:</span> resolve<span class="op">,</span> <span class="dt">reject</span><span class="op">:</span> reject }<span class="op">;</span> <span class="co">// ② 保存 Promise 回调</span></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a>        <span class="kw">var</span> timer <span class="op">=</span> <span class="pp">setTimeout</span>(<span class="kw">function</span>() {</span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a>            <span class="fu">cleanupCallback</span>(id)<span class="op">;</span></span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a>        }<span class="op">,</span> CALLBACK_TIMEOUT)<span class="op">;</span>                                  <span class="co">// ③ 30秒超时保护</span></span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a>        _callbacks[id]<span class="op">.</span><span class="at">_timer</span> <span class="op">=</span> timer<span class="op">;</span></span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a>        <span class="kw">var</span> message <span class="op">=</span> <span class="bu">JSON</span><span class="op">.</span><span class="fu">stringify</span>({                         <span class="co">// ④ 序列化为 JSON</span></span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a>            <span class="dt">type</span><span class="op">:</span> <span class="st">&#39;call&#39;</span><span class="op">,</span></span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true" tabindex="-1"></a>            <span class="dt">callId</span><span class="op">:</span> id<span class="op">,</span></span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true" tabindex="-1"></a>            <span class="dt">method</span><span class="op">:</span> method<span class="op">,</span></span>
+<span id="cb7-13"><a href="#cb7-13" aria-hidden="true" tabindex="-1"></a>            <span class="dt">params</span><span class="op">:</span> params <span class="op">||</span> {}</span>
+<span id="cb7-14"><a href="#cb7-14" aria-hidden="true" tabindex="-1"></a>        })<span class="op">;</span></span>
+<span id="cb7-15"><a href="#cb7-15" aria-hidden="true" tabindex="-1"></a>        <span class="bu">window</span><span class="op">.</span><span class="at">KuiklyBridge</span><span class="op">.</span><span class="fu">_postMessage</span>(message)<span class="op">;</span>            <span class="co">// ⑤ 发送到 Native</span></span>
+<span id="cb7-16"><a href="#cb7-16" aria-hidden="true" tabindex="-1"></a>    })<span class="op">;</span></span>
+<span id="cb7-17"><a href="#cb7-17" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div>
+<h3 id="消息-json-格式">5.3 消息 JSON 格式</h3>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;type&quot;</span><span class="fu">:</span> <span class="st">&quot;call&quot;</span><span class="fu">,</span></span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;callId&quot;</span><span class="fu">:</span> <span class="st">&quot;cb_0&quot;</span><span class="fu">,</span></span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;method&quot;</span><span class="fu">:</span> <span class="st">&quot;getDeviceInfo&quot;</span><span class="fu">,</span></span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;params&quot;</span><span class="fu">:</span> <span class="fu">{</span> <span class="dt">&quot;key&quot;</span><span class="fu">:</span> <span class="st">&quot;model&quot;</span> <span class="fu">}</span></span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
+<h3 id="postmessage-三端路由">5.4 <code>_postMessage</code>
+三端路由</h3>
+<pre><code>JS: _postMessage(jsonString)
+  ├── iOS:     window.webkit.messageHandlers.KuiklyNativeHandler.postMessage(msg)
+  ├── Android: window.KuiklyNativeHandler.postMessage(msg)  [@JavascriptInterface]
+  └── OHOS:    window.KuiklyNativeHandler.postMessage(msg)  [javaScriptProxy]</code></pre>
+<hr />
+<h2 id="native-js-通信机制">6. Native → JS 通信机制</h2>
+<h3 id="回调-js-promise">6.1 回调 JS Promise</h3>
+<p>Native 处理完调用后，构建回调脚本：</p>
+<div class="sourceCode" id="cb10"><pre
+class="sourceCode kotlin"><code class="sourceCode kotlin"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="co">// Kotlin 共享层</span></span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a><span class="kw">fun</span> <span class="fu">buildResponseScript</span><span class="op">(</span><span class="va">callId</span><span class="op">:</span> <span class="dt">String</span><span class="op">,</span> <span class="va">result</span><span class="op">:</span> <span class="dt">String</span><span class="op">?,</span> <span class="va">error</span><span class="op">:</span> <span class="dt">String</span><span class="op">?):</span> <span class="dt">String</span> <span class="op">{</span></span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a>    <span class="kw">val</span> <span class="va">resultStr</span> <span class="op">=</span> result <span class="op">?:</span> <span class="st">&quot;null&quot;</span></span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a>    <span class="kw">val</span> <span class="va">errorStr</span> <span class="op">=</span> <span class="cf">if</span> <span class="op">(</span>error <span class="op">!=</span> <span class="kw">null</span><span class="op">)</span> <span class="st">&quot;&#39;</span><span class="ss">${</span>escapeJsString<span class="op">(</span>error<span class="op">)</span><span class="ss">}</span><span class="st">&#39;&quot;</span> <span class="cf">else</span> <span class="st">&quot;null&quot;</span></span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true" tabindex="-1"></a>    <span class="kw">return</span> <span class="st">&quot;window.KuiklyBridge._onNativeResponse(&#39;</span><span class="ss">${</span>escapeJsString<span class="op">(</span>callId<span class="op">)</span><span class="ss">}</span><span class="st">&#39;, </span><span class="ss">$resultStr</span><span class="st">, </span><span class="ss">$errorStr</span><span class="st">);&quot;</span></span>
+<span id="cb10-6"><a href="#cb10-6" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<p>生成的 JS 脚本示例：</p>
+<div class="sourceCode" id="cb11"><pre
+class="sourceCode javascript"><code class="sourceCode javascript"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="bu">window</span><span class="op">.</span><span class="at">KuiklyBridge</span><span class="op">.</span><span class="fu">_onNativeResponse</span>(<span class="st">&#39;cb_0&#39;</span><span class="op">,</span> {<span class="st">&quot;model&quot;</span><span class="op">:</span><span class="st">&quot;iPhone 15&quot;</span>}<span class="op">,</span> <span class="kw">null</span>)<span class="op">;</span></span></code></pre></div>
+<h3 id="js-端-_onnativeresponse-处理">6.2 JS 端
+<code>_onNativeResponse</code> 处理</h3>
+<div class="sourceCode" id="cb12"><pre
+class="sourceCode javascript"><code class="sourceCode javascript"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a>_onNativeResponse<span class="op">:</span> <span class="kw">function</span>(callId<span class="op">,</span> result<span class="op">,</span> error) {</span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">var</span> cb <span class="op">=</span> _callbacks[callId]<span class="op">;</span>       <span class="co">// 通过 callId 找到 Promise</span></span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (cb) {</span>
+<span id="cb12-4"><a href="#cb12-4" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> (cb<span class="op">.</span><span class="at">_timer</span>) <span class="pp">clearTimeout</span>(cb<span class="op">.</span><span class="at">_timer</span>)<span class="op">;</span>  <span class="co">// 清除超时计时器</span></span>
+<span id="cb12-5"><a href="#cb12-5" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> (error) {</span>
+<span id="cb12-6"><a href="#cb12-6" aria-hidden="true" tabindex="-1"></a>            cb<span class="op">.</span><span class="fu">reject</span>(<span class="kw">new</span> <span class="bu">Error</span>(error))<span class="op">;</span>           <span class="co">// 有错误 → reject</span></span>
+<span id="cb12-7"><a href="#cb12-7" aria-hidden="true" tabindex="-1"></a>        } <span class="cf">else</span> {</span>
+<span id="cb12-8"><a href="#cb12-8" aria-hidden="true" tabindex="-1"></a>            cb<span class="op">.</span><span class="fu">resolve</span>(result)<span class="op">;</span>                    <span class="co">// 无错误 → resolve</span></span>
+<span id="cb12-9"><a href="#cb12-9" aria-hidden="true" tabindex="-1"></a>        }</span>
+<span id="cb12-10"><a href="#cb12-10" aria-hidden="true" tabindex="-1"></a>        <span class="kw">delete</span> _callbacks[callId]<span class="op">;</span>                 <span class="co">// 清理，防止内存泄漏</span></span>
+<span id="cb12-11"><a href="#cb12-11" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb12-12"><a href="#cb12-12" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div>
+<h3 id="native-主动推送事件">6.3 Native 主动推送事件</h3>
+<div class="sourceCode" id="cb13"><pre
+class="sourceCode kotlin"><code class="sourceCode kotlin"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="kw">fun</span> <span class="fu">buildEventScript</span><span class="op">(</span><span class="va">method</span><span class="op">:</span> <span class="dt">String</span><span class="op">,</span> <span class="va">params</span><span class="op">:</span> <span class="dt">String</span><span class="op">):</span> <span class="dt">String</span> <span class="op">{</span></span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">return</span> <span class="st">&quot;window.KuiklyBridge._onNativeEvent({method:&#39;</span><span class="ss">${</span>escapeJsString<span class="op">(</span>method<span class="op">)</span><span class="ss">}</span><span class="st">&#39;,params:</span><span class="ss">$params</span><span class="st">});&quot;</span></span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<p>JS 端通过 <code>registerHandler</code> 注册事件处理器来接收。</p>
+<hr />
+<h2 id="native-对象如何挂载到-js-环境">7. Native 对象如何挂载到 JS
+环境</h2>
+<p>JS 中的 <code>window.KuiklyNativeHandler</code> 不是 JS
+自己创建的，而是各平台原生层在 <strong>WebView 初始化时预先注入</strong>
+的。</p>
+<h3 id="ios-addscriptmessagehandler">7.1 iOS —
+<code>addScriptMessageHandler</code></h3>
+<pre class="objc"><code>// KRWebView.m - setupWebView 中
+[self.webView.configuration.userContentController
+    addScriptMessageHandler:self.jsBridge
+                       name:@&quot;KuiklyNativeHandler&quot;];</code></pre>
+<ul>
+<li>WKWebView <strong>自动</strong>在 JS 环境中创建
+<code>window.webkit.messageHandlers.KuiklyNativeHandler</code></li>
+<li>该对象自带 <code>postMessage()</code> 方法</li>
+<li>JS 调用时触发 <code>didReceiveScriptMessage:</code> 回调</li>
+<li>销毁时需手动移除：<code>removeScriptMessageHandlerForName:</code></li>
+</ul>
+<blockquote>
+<p>⚠️ iOS 与其他两端不同：Native 对象挂在
+<code>window.webkit.messageHandlers</code> 下，而非直接挂在
+<code>window</code> 上。</p>
+</blockquote>
+<h3 id="android-addjavascriptinterface">7.2 Android —
+<code>addJavascriptInterface</code></h3>
+<div class="sourceCode" id="cb15"><pre
+class="sourceCode kotlin"><code class="sourceCode kotlin"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a><span class="co">// KRWebView.kt - init 中</span></span>
+<span id="cb15-2"><a href="#cb15-2" aria-hidden="true" tabindex="-1"></a>webView<span class="op">.</span>addJavascriptInterface<span class="op">(</span>jsBridge<span class="op">,</span> JSBridgeProtocol<span class="op">.</span>NATIVE_HANDLER_NAME<span class="op">)</span></span></code></pre></div>
+<ul>
+<li>将 Kotlin 对象<strong>直接</strong>挂载到
+<code>window.KuiklyNativeHandler</code></li>
+<li>标注 <code>@JavascriptInterface</code> 的方法暴露给 JS 调用</li>
+<li>销毁时移除：<code>removeJavascriptInterface()</code></li>
+</ul>
+<h3 id="ohos-javascriptproxy">7.3 OHOS —
+<code>javaScriptProxy</code></h3>
+<div class="sourceCode" id="cb16"><pre
+class="sourceCode typescript"><code class="sourceCode typescript"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a><span class="co">// KRWebView.ets - @Builder 中</span></span>
+<span id="cb16-2"><a href="#cb16-2" aria-hidden="true" tabindex="-1"></a><span class="fu">Web</span>({ src<span class="op">:</span> <span class="st">&#39;&#39;</span><span class="op">,</span> controller<span class="op">:</span> <span class="kw">this</span><span class="op">.</span><span class="at">renderView</span><span class="op">.</span><span class="at">controller</span> })</span>
+<span id="cb16-3"><a href="#cb16-3" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span><span class="fu">javaScriptProxy</span>({</span>
+<span id="cb16-4"><a href="#cb16-4" aria-hidden="true" tabindex="-1"></a>        object<span class="op">:</span> <span class="kw">this</span><span class="op">.</span><span class="at">jsBridge</span><span class="op">.</span><span class="fu">getJavaScriptProxyObject</span>()<span class="op">,</span></span>
+<span id="cb16-5"><a href="#cb16-5" aria-hidden="true" tabindex="-1"></a>        name<span class="op">:</span> <span class="st">&#39;KuiklyNativeHandler&#39;</span><span class="op">,</span></span>
+<span id="cb16-6"><a href="#cb16-6" aria-hidden="true" tabindex="-1"></a>        methodList<span class="op">:</span> [<span class="st">&#39;postMessage&#39;</span>]<span class="op">,</span></span>
+<span id="cb16-7"><a href="#cb16-7" aria-hidden="true" tabindex="-1"></a>        controller<span class="op">:</span> <span class="kw">this</span><span class="op">.</span><span class="at">controller</span></span>
+<span id="cb16-8"><a href="#cb16-8" aria-hidden="true" tabindex="-1"></a>    })</span></code></pre></div>
+<ul>
+<li>声明式配置，Web 组件创建时生效</li>
+<li><code>methodList</code> 限定 JS 只能调用指定方法</li>
+<li>组件销毁时自动清理</li>
+</ul>
+<h3 id="对比表">对比表</h3>
+<table>
+<colgroup>
+<col style="width: 23%" />
+<col style="width: 19%" />
+<col style="width: 34%" />
+<col style="width: 23%" />
+</colgroup>
+<thead>
+<tr>
+<th>维度</th>
+<th>iOS</th>
+<th>Android</th>
+<th>OHOS</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>挂载 API</strong></td>
+<td><code>addScriptMessageHandler</code></td>
+<td><code>addJavascriptInterface</code></td>
+<td><code>.javaScriptProxy()</code></td>
+</tr>
+<tr>
+<td><strong>挂载位置</strong></td>
+<td><code>setupWebView()</code></td>
+<td><code>init {}</code></td>
+<td><code>@Builder build()</code></td>
+</tr>
+<tr>
+<td><strong>JS 路径</strong></td>
+<td><code>window.webkit.messageHandlers.KuiklyNativeHandler</code></td>
+<td><code>window.KuiklyNativeHandler</code></td>
+<td><code>window.KuiklyNativeHandler</code></td>
+</tr>
+<tr>
+<td><strong>方法暴露控制</strong></td>
+<td><code>WKScriptMessageHandler</code> 协议</td>
+<td><code>@JavascriptInterface</code> 注解</td>
+<td><code>methodList</code> 数组</td>
+</tr>
+<tr>
+<td><strong>卸载方式</strong></td>
+<td>手动 <code>removeScriptMessageHandlerForName:</code></td>
+<td>手动 <code>removeJavascriptInterface()</code></td>
+<td>组件销毁自动清理</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="native-处理-json-消息的流程">8. Native 处理 JSON 消息的流程</h2>
+<p>三端都通过 <strong>两级处理</strong>：<code>handleMessage</code> →
+<code>handleNativeCall</code>。</p>
+<h3 id="第一级handlemessage-解析-json-并分发">8.1 第一级：handleMessage
+— 解析 JSON 并分发</h3>
+<p><strong>Android：</strong></p>
+<div class="sourceCode" id="cb17"><pre
+class="sourceCode kotlin"><code class="sourceCode kotlin"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a><span class="kw">private</span> <span class="kw">fun</span> <span class="fu">handleMessage</span><span class="op">(</span><span class="va">message</span><span class="op">:</span> <span class="dt">String</span><span class="op">)</span> <span class="op">{</span></span>
+<span id="cb17-2"><a href="#cb17-2" aria-hidden="true" tabindex="-1"></a>    <span class="cf">try</span> <span class="op">{</span></span>
+<span id="cb17-3"><a href="#cb17-3" aria-hidden="true" tabindex="-1"></a>        <span class="kw">val</span> <span class="va">json</span> <span class="op">=</span> JSONObject<span class="op">(</span>message<span class="op">)</span>                           <span class="co">// 解析 JSON</span></span>
+<span id="cb17-4"><a href="#cb17-4" aria-hidden="true" tabindex="-1"></a>        <span class="kw">val</span> <span class="va">type</span> <span class="op">=</span> json<span class="op">.</span>optString<span class="op">(</span>JSBridgeProtocol<span class="op">.</span>KEY_TYPE<span class="op">)</span>     <span class="co">// 提取 type</span></span>
+<span id="cb17-5"><a href="#cb17-5" aria-hidden="true" tabindex="-1"></a>        <span class="cf">when</span> <span class="op">(</span>type<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb17-6"><a href="#cb17-6" aria-hidden="true" tabindex="-1"></a>            JSBridgeProtocol<span class="op">.</span>TYPE_CALL <span class="op">-&gt;</span> handleNativeCall<span class="op">(</span>json<span class="op">)</span>  <span class="co">// type == &quot;call&quot;</span></span>
+<span id="cb17-7"><a href="#cb17-7" aria-hidden="true" tabindex="-1"></a>            <span class="cf">else</span> <span class="op">-&gt;</span> onMessage<span class="op">(</span>message<span class="op">)</span>                            <span class="co">// 其他类型透传</span></span>
+<span id="cb17-8"><a href="#cb17-8" aria-hidden="true" tabindex="-1"></a>        <span class="op">}</span></span>
+<span id="cb17-9"><a href="#cb17-9" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span> <span class="cf">catch</span> <span class="op">(</span>e<span class="op">:</span> Exception<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb17-10"><a href="#cb17-10" aria-hidden="true" tabindex="-1"></a>        onMessage<span class="op">(</span>message<span class="op">)</span>                                        <span class="co">// 解析失败透传</span></span>
+<span id="cb17-11"><a href="#cb17-11" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb17-12"><a href="#cb17-12" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<p><strong>iOS：</strong></p>
+<pre class="objc"><code>- (void)handleMessage:(NSString *)message {
+    NSData *data = [message dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&amp;error];
+    // ... type == &quot;call&quot; → handleNativeCall:
+}</code></pre>
+<p><strong>OHOS：</strong></p>
+<div class="sourceCode" id="cb19"><pre
+class="sourceCode typescript"><code class="sourceCode typescript"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a><span class="kw">private</span> <span class="fu">handleMessage</span>(message<span class="op">:</span> <span class="dt">string</span>)<span class="op">:</span> <span class="dt">void</span> {</span>
+<span id="cb19-2"><a href="#cb19-2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">const</span> json <span class="op">=</span> <span class="bu">JSON</span><span class="op">.</span><span class="fu">parse</span>(message) <span class="im">as</span> <span class="bu">Record</span><span class="op">&lt;</span><span class="dt">string</span><span class="op">,</span> <span class="bu">Object</span><span class="op">&gt;;</span></span>
+<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a>    <span class="co">// ... type === &#39;call&#39; → this.handleNativeCall(json)</span></span>
+<span id="cb19-4"><a href="#cb19-4" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div>
+<h3 id="第二级handlenativecall-提取参数查找-handler执行">8.2
+第二级：handleNativeCall — 提取参数、查找 handler、执行</h3>
+<pre><code>提取 callId / method / params
+        │
+        ▼
+nativeHandlers[method] 存在？
+        │
+    ┌───┴───┐
+    Yes     No
+    │       │
+    ▼       ▼
+执行 handler   返回错误
+(params, callback)   &quot;Method &#39;xxx&#39; not registered&quot;
+    │
+    ▼
+callback.resolve(result) / reject(error)
+    │
+    ▼
+buildResponseScript → evaluateJavaScript
+回调 JS 端 Promise</code></pre>
+<h3 id="三端-json-解析方式对比">8.3 三端 JSON 解析方式对比</h3>
+<table>
+<colgroup>
+<col style="width: 28%" />
+<col style="width: 32%" />
+<col style="width: 17%" />
+<col style="width: 21%" />
+</colgroup>
+<thead>
+<tr>
+<th>对比项</th>
+<th>Android</th>
+<th>iOS</th>
+<th>OHOS</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>解析 API</strong></td>
+<td><code>JSONObject(message)</code></td>
+<td><code>NSJSONSerialization</code></td>
+<td><code>JSON.parse(message)</code></td>
+</tr>
+<tr>
+<td><strong>结果类型</strong></td>
+<td><code>JSONObject</code></td>
+<td><code>NSDictionary</code></td>
+<td><code>Record&lt;string, Object&gt;</code></td>
+</tr>
+<tr>
+<td><strong>线程处理</strong></td>
+<td><code>mainHandler.post {}</code></td>
+<td><code>dispatch_async(main)</code></td>
+<td>同步</td>
+</tr>
+<tr>
+<td><strong>handler 存储</strong></td>
+<td><code>ConcurrentHashMap</code></td>
+<td><code>NSMutableDictionary</code></td>
+<td><code>Map&lt;string, Handler&gt;</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="消息路由从-postmessage-到-handlemessage">9. 消息路由：从
+postMessage 到 handleMessage</h2>
+<p>以 Android 端为例，完整链路如下：</p>
+<h3 id="三步接线">三步”接线”</h3>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>步骤</th>
+<th>动作</th>
+<th>代码</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>① 装电话</td>
+<td>把 Kotlin 对象安装到 JS 的 <code>window</code> 上</td>
+<td><code>addJavascriptInterface(jsBridge, "KuiklyNativeHandler")</code></td>
+</tr>
+<tr>
+<td>② 接线</td>
+<td>告诉 JS “_postMessage 请拨打 KuiklyNativeHandler 的号码”</td>
+<td><code>_postMessage = window.KuiklyNativeHandler.postMessage</code></td>
+</tr>
+<tr>
+<td>③ 拨号</td>
+<td>JS 业务代码发起调用</td>
+<td><code>callNative('getDeviceInfo', {...})</code></td>
+</tr>
+<tr>
+<td>④ 转接</td>
+<td>Android 引擎通过反射找到 <code>@JavascriptInterface</code> 方法</td>
+<td>引擎内部机制</td>
+</tr>
+<tr>
+<td>⑤ 接听</td>
+<td>Kotlin 的 <code>postMessage</code> 收到消息，转到主线程</td>
+<td><code>mainHandler.post { handleMessage(message) }</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="完整调用序列图">完整调用序列图</h3>
+<pre><code>JS: callNative(&#39;getDeviceInfo&#39;, {key:&#39;model&#39;})
+  │
+  ▼ JSON 字符串
+{&quot;type&quot;:&quot;call&quot;,&quot;callId&quot;:&quot;cb_0&quot;,&quot;method&quot;:&quot;getDeviceInfo&quot;,&quot;params&quot;:{&quot;key&quot;:&quot;model&quot;}}
+  │
+  ▼ _postMessage() 各平台路由
+  ├── iOS:     webkit.messageHandlers.KuiklyNativeHandler.postMessage(msg)
+  ├── Android: KuiklyNativeHandler.postMessage(msg)  [@JavascriptInterface]
+  └── OHOS:    KuiklyNativeHandler.postMessage(msg)  [javaScriptProxy]
+  │
+  ▼ Native 解析 JSON → 执行 handler → 得到结果
+  │
+  ▼ Native 调用 evaluateJavaScript / runJavaScript
+window.KuiklyBridge._onNativeResponse(&#39;cb_0&#39;, {&quot;model&quot;:&quot;iPhone 15&quot;}, null);
+  │
+  ▼ JS Promise resolved
+result = { model: &quot;iPhone 15&quot; }</code></pre>
+<hr />
+<h2 id="android-javascriptinterface-反射机制详解">10. Android <span
+class="citation"
+data-cites="JavascriptInterface">@JavascriptInterface</span>
+反射机制详解</h2>
+<h3 id="什么是反射">10.1 什么是反射</h3>
+<p>反射（Reflection）是 Java/Kotlin
+的能力：<strong>在运行时根据字符串名称动态查找和调用类的方法</strong>，而不需要编译时硬编码调用关系。</p>
+<div class="sourceCode" id="cb22"><pre
+class="sourceCode kotlin"><code class="sourceCode kotlin"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a><span class="co">// 正常调用（编译时确定）</span></span>
+<span id="cb22-2"><a href="#cb22-2" aria-hidden="true" tabindex="-1"></a>jsBridge<span class="op">.</span>postMessage<span class="op">(</span><span class="st">&quot;hello&quot;</span><span class="op">)</span></span>
+<span id="cb22-3"><a href="#cb22-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb22-4"><a href="#cb22-4" aria-hidden="true" tabindex="-1"></a><span class="co">// 反射调用（运行时动态查找）</span></span>
+<span id="cb22-5"><a href="#cb22-5" aria-hidden="true" tabindex="-1"></a><span class="kw">val</span> <span class="va">method</span> <span class="op">=</span> jsBridge<span class="op">.</span>javaClass<span class="op">.</span>getMethod<span class="op">(</span><span class="st">&quot;postMessage&quot;</span><span class="op">,</span> <span class="kw">String</span><span class="op">::</span><span class="kw">class</span>.java)</span>
+<span id="cb22-6"><a href="#cb22-6" aria-hidden="true" tabindex="-1"></a>method.invoke<span class="op">(</span><span class="va">jsBridge</span><span class="op">,</span> &quot;<span class="va">hello</span>&quot;<span class="op">)</span></span></code></pre></div>
+<h3 id="注册阶段">10.2 注册阶段</h3>
+<p>当调用
+<code>addJavascriptInterface(jsBridge, "KuiklyNativeHandler")</code>
+时，WebView 引擎内部：</p>
+<pre><code>1. 获取对象的 Class 信息
+2. 反射扫描所有公开方法
+3. 过滤：只保留带 @JavascriptInterface 注解的方法
+4. 在 V8 引擎中创建 JS 代理对象 window.KuiklyNativeHandler
+5. 为代理对象绑定同名 JS 函数 postMessage()
+6. 保存映射关系：name → (对象实例, Method 对象)</code></pre>
+<p>伪代码：</p>
+<div class="sourceCode" id="cb24"><pre
+class="sourceCode java"><code class="sourceCode java"><span id="cb24-1"><a href="#cb24-1" aria-hidden="true" tabindex="-1"></a><span class="dt">void</span> <span class="fu">addJavascriptInterface</span><span class="op">(</span><span class="bu">Object</span> obj<span class="op">,</span> <span class="bu">String</span> name<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb24-2"><a href="#cb24-2" aria-hidden="true" tabindex="-1"></a>    <span class="bu">Class</span><span class="op">&lt;?&gt;</span> clazz <span class="op">=</span> obj<span class="op">.</span><span class="fu">getClass</span><span class="op">();</span></span>
+<span id="cb24-3"><a href="#cb24-3" aria-hidden="true" tabindex="-1"></a>    <span class="bu">Map</span><span class="op">&lt;</span><span class="bu">String</span><span class="op">,</span> <span class="bu">Method</span><span class="op">&gt;</span> exposedMethods <span class="op">=</span> <span class="kw">new</span> <span class="bu">HashMap</span><span class="op">&lt;&gt;();</span></span>
+<span id="cb24-4"><a href="#cb24-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-5"><a href="#cb24-5" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> <span class="op">(</span><span class="bu">Method</span> method <span class="op">:</span> clazz<span class="op">.</span><span class="fu">getMethods</span><span class="op">())</span> <span class="op">{</span></span>
+<span id="cb24-6"><a href="#cb24-6" aria-hidden="true" tabindex="-1"></a>        <span class="co">// 只暴露带 @JavascriptInterface 注解的方法</span></span>
+<span id="cb24-7"><a href="#cb24-7" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="op">(</span>method<span class="op">.</span><span class="fu">isAnnotationPresent</span><span class="op">(</span>JavascriptInterface<span class="op">.</span><span class="fu">class</span><span class="op">))</span> <span class="op">{</span></span>
+<span id="cb24-8"><a href="#cb24-8" aria-hidden="true" tabindex="-1"></a>            exposedMethods<span class="op">.</span><span class="fu">put</span><span class="op">(</span>method<span class="op">.</span><span class="fu">getName</span><span class="op">(),</span> method<span class="op">);</span></span>
+<span id="cb24-9"><a href="#cb24-9" aria-hidden="true" tabindex="-1"></a>        <span class="op">}</span></span>
+<span id="cb24-10"><a href="#cb24-10" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb24-11"><a href="#cb24-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-12"><a href="#cb24-12" aria-hidden="true" tabindex="-1"></a>    <span class="co">// 在 V8 引擎中创建 JS 代理对象</span></span>
+<span id="cb24-13"><a href="#cb24-13" aria-hidden="true" tabindex="-1"></a>    v8Engine<span class="op">.</span><span class="fu">createJSProxy</span><span class="op">(</span>name<span class="op">,</span> exposedMethods<span class="op">);</span></span>
+<span id="cb24-14"><a href="#cb24-14" aria-hidden="true" tabindex="-1"></a>    interfaceMap<span class="op">.</span><span class="fu">put</span><span class="op">(</span>name<span class="op">,</span> <span class="kw">new</span> <span class="fu">BoundObject</span><span class="op">(</span>obj<span class="op">,</span> exposedMethods<span class="op">));</span></span>
+<span id="cb24-15"><a href="#cb24-15" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<h3 id="调用阶段">10.3 调用阶段</h3>
+<p>当 JS 执行 <code>window.KuiklyNativeHandler.postMessage(msg)</code>
+时：</p>
+<pre><code>JS 调用 window.KuiklyNativeHandler.postMessage(msg)
+    │
+    ▼ V8 引擎拦截：这是一个 Native 代理对象的调用
+    │
+    ▼ 通过 JNI 桥接回到 Java/Kotlin 层
+    │
+    ▼ 根据 &quot;KuiklyNativeHandler&quot; 找到 jsBridge 对象
+    │
+    ▼ 根据 &quot;postMessage&quot; 找到 Method 对象
+    │
+    ▼ method.invoke(jsBridge, msg)  ← 反射调用
+    │
+    ▼ 实际执行 KRWebViewJSBridge.postMessage(msg)
+    │
+    ▼ mainHandler.post { handleMessage(msg) }</code></pre>
+<h3 id="javascriptinterface-注解的安全意义">10.4 <span class="citation"
+data-cites="JavascriptInterface">@JavascriptInterface</span>
+注解的安全意义</h3>
+<p>Android 4.2（API 17）之前，<code>addJavascriptInterface</code>
+会暴露对象的<strong>所有公开方法</strong>，包括从 <code>Object</code>
+继承的 <code>getClass()</code>。恶意 JS
+可以通过反射链执行任意系统命令：</p>
+<div class="sourceCode" id="cb26"><pre
+class="sourceCode javascript"><code class="sourceCode javascript"><span id="cb26-1"><a href="#cb26-1" aria-hidden="true" tabindex="-1"></a><span class="co">// 恶意攻击代码（Android 4.2 之前有效）</span></span>
+<span id="cb26-2"><a href="#cb26-2" aria-hidden="true" tabindex="-1"></a><span class="bu">window</span><span class="op">.</span><span class="at">KuiklyNativeHandler</span><span class="op">.</span><span class="fu">getClass</span>()</span>
+<span id="cb26-3"><a href="#cb26-3" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span><span class="fu">forName</span>(<span class="st">&#39;java.lang.Runtime&#39;</span>)</span>
+<span id="cb26-4"><a href="#cb26-4" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span><span class="fu">getMethod</span>(<span class="st">&#39;exec&#39;</span><span class="op">,</span> <span class="op">...</span>)</span>
+<span id="cb26-5"><a href="#cb26-5" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span><span class="fu">invoke</span>(<span class="kw">null</span><span class="op">,</span> <span class="st">&#39;rm -rf /&#39;</span>)</span></code></pre></div>
+<p>Android 4.2+ 引入 <code>@JavascriptInterface</code>
+注解作为白名单机制：<strong>只有标注了此注解的方法才会暴露给
+JS</strong>，未标注的方法 JS 调用会得到 <code>undefined</code>。</p>
+<h3 id="为什么必须用反射">10.5 为什么必须用反射</h3>
+<p>WebView
+引擎是通用的系统组件，<strong>编译时不可能知道开发者会注册什么对象和方法</strong>。只能在运行时通过反射”发现”并调用开发者注册的类上的方法。</p>
+<hr />
+<h2 id="完整调用链路总结">11. 完整调用链路总结</h2>
+<h3 id="一次-js-native-js-的完整数据流">一次 JS → Native → JS
+的完整数据流</h3>
+<pre><code>[JS 前端代码]
+    │
+    │  await KuiklyBridge.callNative(&#39;getDeviceInfo&#39;, {key: &#39;model&#39;})
+    │
+    ▼
+[KuiklyBridge.callNative]
+    │  生成 callId = &#39;cb_0&#39;
+    │  保存 Promise 的 resolve/reject 到 _callbacks[&#39;cb_0&#39;]
+    │  设置 30秒超时计时器
+    │  JSON.stringify → &#39;{&quot;type&quot;:&quot;call&quot;,&quot;callId&quot;:&quot;cb_0&quot;,&quot;method&quot;:&quot;getDeviceInfo&quot;,&quot;params&quot;:{&quot;key&quot;:&quot;model&quot;}}&#39;
+    │
+    ▼
+[KuiklyBridge._postMessage]
+    │  各平台不同实现
+    │  iOS:     window.webkit.messageHandlers.KuiklyNativeHandler.postMessage(msg)
+    │  Android: window.KuiklyNativeHandler.postMessage(msg)
+    │  OHOS:    window.KuiklyNativeHandler.postMessage(msg)
+    │
+    ▼
+[Native 端接收]
+    │  iOS:     didReceiveScriptMessage: 回调
+    │  Android: @JavascriptInterface postMessage() 方法 (反射调用)
+    │  OHOS:    javaScriptProxy 的 postMessage() 方法
+    │
+    ▼
+[handleMessage]
+    │  解析 JSON → 提取 type 字段
+    │  type == &quot;call&quot; → 转到 handleNativeCall
+    │
+    ▼
+[handleNativeCall]
+    │  提取 callId = &#39;cb_0&#39;, method = &#39;getDeviceInfo&#39;, params = {key: &#39;model&#39;}
+    │  查找 nativeHandlers[&#39;getDeviceInfo&#39;] → 找到已注册的 handler
+    │  构建 BridgeCallback 对象
+    │  执行 handler(params, callback)
+    │
+    ▼
+[Native 业务逻辑]
+    │  获取设备信息 → result = &#39;{&quot;model&quot;:&quot;iPhone 15&quot;}&#39;
+    │  调用 callback.resolve(result)
+    │
+    ▼
+[buildResponseScript]
+    │  生成脚本: &quot;window.KuiklyBridge._onNativeResponse(&#39;cb_0&#39;, {&quot;model&quot;:&quot;iPhone 15&quot;}, null);&quot;
+    │
+    ▼
+[evaluateJavaScript / runJavaScript]
+    │  在 WebView 中执行上述 JS 脚本
+    │
+    ▼
+[KuiklyBridge._onNativeResponse]
+    │  通过 &#39;cb_0&#39; 找到 _callbacks[&#39;cb_0&#39;]
+    │  清除超时计时器
+    │  调用 resolve({&quot;model&quot;:&quot;iPhone 15&quot;})
+    │  delete _callbacks[&#39;cb_0&#39;]
+    │
+    ▼
+[JS 前端代码]
+    result = { model: &quot;iPhone 15&quot; }  // Promise resolved</code></pre>
+<h3 id="设计亮点">设计亮点</h3>
+<ol type="1">
+<li><strong>Kotlin Multiplatform 共享协议</strong>：通过
+<code>JSBridgeProtocol.kt</code> 统一定义消息格式、JS
+脚本、工具方法，三端复用</li>
+<li><strong>策略模式</strong>：Bridge 核心逻辑统一，仅
+<code>_postMessage</code> 一个方法因平台而异</li>
+<li><strong>Promise 封装</strong>：对 JS 开发者友好，支持
+<code>async/await</code></li>
+<li><strong>超时保护</strong>：30 秒超时机制防止 Native
+不回调导致内存泄漏</li>
+<li><strong>脚本预缓存</strong>：避免每次页面加载时重复拼接字符串</li>
+<li><strong>O(n) 字符串转义</strong>：单次遍历 StringBuilder 替代多次
+replace 链式调用，性能优化显著</li>
+<li><strong>安全机制</strong>：Android <code>@JavascriptInterface</code>
+白名单、OHOS <code>methodList</code> 显式声明</li>
+</ol>
+<hr />
+<p><em>文档生成日期：2026-03-18</em> <em>基于 KuiklyWebview
+项目源码分析</em></p>

@@ -1,0 +1,10 @@
+{
+  "module": {
+    "name": "KuiklyWebviewOhos",
+    "type": "har",
+    "deviceTypes": [
+      "default",
+      "tablet"
+    ]
+  }
+}
