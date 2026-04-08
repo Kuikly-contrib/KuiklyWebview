@@ -5,37 +5,66 @@ KuiklyWebview 是基于 [Kuikly](https://github.com/Tencent-TDS/KuiklyUI) 框架
 
 
 
-## Android 接入
+## 跨端层接入（KMP）
 
-### 1. 配置仓库
-
-在项目根目录 `settings.gradle.kts` 或 `build.gradle.kts` 中添加 Maven 仓库：
+在 KMP 共享模块的 `build.gradle.kts` 中添加 Maven 仓库和依赖：
 
 ```kotlin
 repositories {
     maven { url = uri("https://mirrors.tencent.com/nexus/repository/maven-tencent") }
 }
+
+dependencies {
+    implementation("com.tencent.kuiklybase:KuiklyWebview:1.0.0-2.0.21")
+}
 ```
 
-### 2. 添加依赖
+> 该依赖为 Kotlin Multiplatform 产物，包含 Android、iOS、JS 等平台的 DSL 定义，各平台原生实现需额外引入（见下方各端接入章节）。
+
+---
+
+## Android 接入
+
+### 1. 添加依赖
+
+在 Android 宿主工程中引入原生实现：
 
 ```kotlin
-// KMP 跨端组件（Kotlin 侧 DSL）
-implementation("com.tencent.kuiklybase:KuiklyWebview:1.0.0-2.0.21")
-
-// Android 原生实现（必须同时引入）
-implementation("com.tencent.kuiklybase:KuiklyWebview-android:1.0.0-2.0.21")
+implementation("com.tencent.kuiklybase:kuikly-webview-android:1.0.0-2.0.21")
 ```
 
-### 3. 注册原生视图
+### 2. 注册原生视图
 
 在 `Application.onCreate()` 或 Kuikly 初始化时注册 WebView：
 
 ```kotlin
-// Kotlin
 KuiklyRenderCore.registerView("KRWebView") { KRWebView(context) }
 ```
 
+---
+
+## iOS 接入
+
+### 1. 添加 CocoaPods 依赖
+
+在 `Podfile` 中添加：
+
+```ruby
+# 方式一：从 GitHub 引入（推荐）
+pod 'KuiklyWebviewIOS', :git => 'https://github.com/Kuikly-contrib/KuiklyWebview.git', :tag => '1.0.0'
+```
+
+然后执行：
+
+```bash
+pod install
+```
+
+### 2. 注册原生视图
+
+iOS 端的 `KRWebView` 遵循 `KuiklyRenderViewExportProtocol` 协议，**通过运行时自动发现，无需手动注册**。
+
+只需确保 `KuiklyWebviewIOS` Pod 被正确引入即可。
 
 ---
 

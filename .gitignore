@@ -42,3 +42,5 @@ Kotlin-js-store
 /.codebuddy
 /.kotlin
 /.run
+
+com_raft.yaml

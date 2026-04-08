@@ -12,7 +12,7 @@ Pod::Spec.new do |s|
   s.source           = { :git => 'https://github.com/Kuikly-contrib/KuiklyWebview.git', :tag => s.version.to_s }
 
   s.ios.deployment_target = '14.1'
-  s.source_files     = 'Classes/**/*.{h,m}'
+  s.source_files     = 'KuiklyWebviewIOS/Classes/**/*.{h,m}'
   s.frameworks       = 'WebKit', 'UIKit'
 
   s.dependency 'OpenKuiklyIOSRender', '~> 2.7.0'
