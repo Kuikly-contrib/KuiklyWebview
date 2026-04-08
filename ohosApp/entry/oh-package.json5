@@ -7,7 +7,7 @@
   "license": "",
   "dependencies": {
     "@kuikly-open/render": '2.7.0',
-    "@kuikly/webview-ohos": "file:../../KuiklyWebviewOhos",
+    "@yuki8273/webview-ohos": "file:../../KuiklyWebviewOhos",
     "@ohos/apng": "^1.0.0-rc.8",
     "libentry.so": "file:./src/main/cpp/types/libentry"
   }

@@ -2,21 +2,8 @@
 
 KuiklyWebview 是基于 [Kuikly](https://github.com/Tencent-TDS/KuiklyUI) 框架的跨端 WebView 组件，支持 **Android、iOS、鸿蒙（OHOS）** 三端，提供统一的 DSL API 和 JSBridge 通信能力。
 
----
----
 
-## 版本说明
 
-版本号格式：`{组件版本}-{Kotlin版本}`
-
-| 组件版本                   | Kotlin 版本 | 说明 |
-|------------------------|---|---|
-| `1.0.0-2.0.21`         | 2.0.21 | 标准版（Android / iOS） |
-| `1.0.0-2.0.21-KBA-010` | 2.0.21-KBA-010 | 鸿蒙版 |
-
-Maven 仓库地址：`https://mirrors.tencent.com/nexus/repository/maven-tencent`
-
----
 
 ## Android 接入
 
@@ -49,6 +36,27 @@ implementation("com.tencent.kuiklybase:KuiklyWebview-android:1.0.0-2.0.21")
 KuiklyRenderCore.registerView("KRWebView") { KRWebView(context) }
 ```
 
+
+---
+
+## 鸿蒙（OHOS）接入
+
+### 1. 安装依赖
+
+```bash
+ohpm install @yuki8273/webview-ohos
+```
+
+### 2. 注册原生视图
+
+在应用初始化时注册 `KRWebView`：
+
+```typescript
+import { KRWebView } from '@yuki8273/webview-ohos';
+import { KuiklyRenderBaseView } from '@kuikly-open/render';
+
+KuiklyRenderBaseView.registerView(KRWebView.VIEW_NAME, () => new KRWebView());
+```
 
 ---
 

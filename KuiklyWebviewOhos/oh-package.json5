@@ -1,9 +1,9 @@
 {
-  "name": "@kuikly/webview-ohos",
+  "name": "@yuki8273/webview-ohos",
   "version": "1.0.0",
   "description": "KuiklyWebView OHOS native implementation based on Web component",
 "main": "Index.ets",
-  "author": "",
+  "author": "yuki8273",
   "license": "MIT",
   "dependencies": {
     "@kuikly-open/render": "2.7.0"
