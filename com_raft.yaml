@@ -1,0 +1,16 @@
+name: KuiklyWebview                     # 组件英文名，必填，纯英文不允许带空格
+displayName: ""             # 组件展示名，选填，填写后替代英文名进行展示
+version: 1.0.0                # 组件版本，必填
+apiVersion: npm/v1
+platform: kuikly
+summary: "基于 Kuikly 框架的跨端 WebView 组件，支持 Android、iOS、鸿蒙三端，提供统一 DSL API 和 JSBridge 通信能力"     # 组件介绍摘要，必填，用于市场首页展示
+description: "KuiklyWebview 是基于 Kuikly 框架的跨端 WebView 组件，支持 Android、iOS、鸿蒙（OHOS）三端。提供声明式 DSL API（WebView {}）、命令式 API（loadUrl/evaluateJavaScript/goBack 等）、内置 JSBridge 通信协议（JS 调 Native / Native 推送事件）、页面加载生命周期事件回调（onPageStarted/onPageFinished/onProgressChanged/onError 等），以及自定义 UserAgent、DOM Storage 等丰富配置项。" # 组件详细介绍，必填，用于组件详情页展示
+team: "Kuikly"                  # 团队名称，必填，用于市场团队展示，由上架业务团队自行定义即可
+kotlin: 2.0.21                    # 组件的kotlin版本环境
+kuiklyType: "Kuikly组件"               # 官方KMP组件或者是Kuikly组件,kuikly组件包含自定义module和自定义view两种类别
+kuiklyTarget:                        # 以下字段标识组件可运行的平台
+  - android                     # 组件是否支持Android端运行
+  - iOS                         # 组件是否支持iOS端运行
+  - ohosNative                  # 支持native产物在鸿蒙上运行
+owner:                            # 负责人
+  - yukiykchen
