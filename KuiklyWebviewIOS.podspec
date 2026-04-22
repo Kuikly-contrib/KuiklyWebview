@@ -15,5 +15,5 @@ Pod::Spec.new do |s|
   s.source_files     = 'KuiklyWebviewIOS/Classes/**/*.{h,m}'
   s.frameworks       = 'WebKit', 'UIKit'
 
-  s.dependency 'OpenKuiklyIOSRender', '~> 2.7.0'
+  s.dependency 'OpenKuiklyIOSRender'
 end
