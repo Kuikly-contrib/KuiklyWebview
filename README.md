@@ -244,6 +244,9 @@ webViewRef.view?.sendMessageToJS("onDataReady", """{"key":"value"}""")
 | `domStorageEnabled(enabled)` | `Boolean` | 是否启用 DOM Storage，默认 `true` |
 | `userAgent(ua)` | `String` | 自定义 User-Agent |
 | `allowsInlineMediaPlayback(allowed)` | `Boolean` | 是否允许内联媒体播放，默认 `true` |
+| `urlInterceptSchemes(schemes)` | `List<String>` | 需要由原生拦截的 scheme 列表（命中即 cancel + 上抛事件），mainFrame 与 iframe 都生效 |
+| `urlInterceptHosts(hosts)` | `List<String>` | 需要拦截的 host 列表，**支持 `*.example.com` 通配符**（仅作用于 mainFrame） |
+| `reportAllNavigation(enabled)` | `Boolean` | 是否对所有 mainFrame 导航都触发事件（仅感知，不拦截 http/https），默认 `false` |
 
 ### `event { }` 事件
 
@@ -255,6 +258,7 @@ webViewRef.view?.sendMessageToJS("onDataReady", """{"key":"value"}""")
 | `onReceiveTitle { title }` | `title: String` | 收到页面标题 |
 | `onProgressChanged { progress }` | `progress: Int`（0-100） | 加载进度变化 |
 | `onMessage { message }` | `message: String` | 收到 JS 发来的消息 |
+| `onShouldOverrideUrlLoading { url, isMainFrame, source }` | `String, Boolean, String` | URL 拦截感知事件，详见下方 [URL 拦截](#url-拦截) |
 
 ### 命令式方法
 
@@ -266,6 +270,125 @@ webViewRef.view?.sendMessageToJS("onDataReady", """{"key":"value"}""")
 | `goBack()` | 后退 |
 | `goForward()` | 前进 |
 | `reload()` | 重新加载 |
+| `stopLoading()` | 停止当前加载（**事后兜底**，不能回滚已发出的请求；真正的同步拦截请用 `urlInterceptSchemes` / `urlInterceptHosts`） |
 | `canGoBack(callback)` | 查询是否可后退 |
 | `canGoForward(callback)` | 查询是否可前进 |
 | `sendMessageToJS(method, params)` | 向 JS 发送消息（JSBridge） |
+
+---
+
+## URL 拦截
+
+KuiklyWebview 提供两层 URL 拦截能力，覆盖原生导航和 SPA 路由变化两类场景。
+
+### 设计要点
+
+由于 Kuikly 桥接是**单向异步**的，无法像原生 `WebViewClient.shouldOverrideUrlLoading` 那样通过返回值同步阻断加载。本组件采用 **"原生侧同步规则下发 + 异步事件感知"** 组合方案：
+
+1. **`urlInterceptSchemes` / `urlInterceptHosts`**：规则下发到原生层，原生侧**同步**判断、命中即 cancel 加载，同时上抛事件
+2. **`onShouldOverrideUrlLoading`**：异步事件，用于业务感知；命中规则、非标准 scheme、SPA 路由变化都会触发
+3. **`stopLoading()`**：**事后兜底**——业务在事件回调里发现需要阻止某次 http(s) 加载时可调用，但由于桥接异步，**不能阻止已发出的 HTTP 请求，也不能回滚已修改的 History**。能真正做到"零请求外发"的拦截方式是配置同步规则 (`urlInterceptSchemes` / `urlInterceptHosts`)
+4. **SPA 路由 hook**：组件内置 JS hook（`history.pushState` / `replaceState` / `popstate` / `hashchange`），原生 `shouldOverrideUrlLoading` 拦不到的 SPA 内部路由也能通过事件上抛
+
+### host 匹配语法
+
+`urlInterceptHosts` 的每一条规则支持两种语法：
+
+| 语法 | 说明 | 示例命中 | 示例不命中 |
+|---|---|---|---|
+| `example.com` | **精确匹配**：host 必须完全等于规则 | `example.com` | `m.example.com` / `foo.example.com` |
+| `*.example.com` | **通配符匹配**：匹配 `example.com` 自身 + 任意层级子域 | `example.com` / `m.example.com` / `a.b.example.com` | `myexample.com` / `example.com.cn` |
+
+匹配时自动忽略端口与大小写。
+
+### 运行时动态更新
+
+`urlInterceptSchemes` / `urlInterceptHosts` / `reportAllNavigation` 三个 attr 都支持**运行时动态更新**：
+每次变更都会完全覆盖旧规则，已经加载的页面继续保留，但后续的导航立即按新规则执行。适合风控下发、A/B 实验等场景。
+
+```kotlin
+// 在页面打开后，运行时切换规则
+private var interceptHosts by observable(listOf("order.example.com"))
+
+// ...
+WebView {
+    attr {
+        src("https://example.com")
+        urlInterceptHosts(ctx.interceptHosts)  // 依赖响应式状态，变更即生效
+    }
+}
+
+// 用户点击某个按钮后，追加规则
+fun onToggleStrictMode() {
+    interceptHosts = listOf("order.example.com", "*.pay.example.com")
+}
+```
+
+### Frame 作用范围
+
+| 规则 | mainFrame | iframe |
+|---|---|---|
+| `urlInterceptSchemes` | ✅ 拦截 + 事件 | ✅ 拦截 + 事件（自定义 scheme 不应出现在 iframe，防御性拦截） |
+| `urlInterceptHosts` | ✅ 拦截 + 事件 | ❌ 不处理（避免误伤第三方广告 / 支付 iframe） |
+| `reportAllNavigation` | ✅ 上抛事件（不拦） | ❌ 不上抛（降低噪音） |
+| 安全黑名单（javascript/data/blob/vbscript） | ✅ 始终拦截 | ✅ 始终拦截 |
+
+### 使用示例
+
+```kotlin
+WebView {
+    attr {
+        src("https://app.example.com/page")
+        // 自定义 scheme 由原生路由处理（同步拦截）
+        urlInterceptSchemes(listOf("myapp", "tdsworkshop"))
+        // 业务域名跳转走原生（同步拦截，仅 mainFrame）
+        // 支持通配符：`*.order.example.com` 匹配订单相关所有子域
+        urlInterceptHosts(listOf("order.example.com", "*.pay.example.com"))
+        // 想监听所有 mainFrame 导航做埋点（不拦截 http/https）
+        reportAllNavigation(true)
+    }
+    event {
+        onShouldOverrideUrlLoading { url, isMainFrame, source ->
+            when {
+                url.startsWith("myapp://") -> {
+                    // 业务自定义协议，走原生路由
+                    routerOpen(url)
+                }
+                url.contains("/order/") -> {
+                    // 命中 host 拦截规则后已 cancel，无需 stopLoading
+                    routerOpenOrderDetail(url)
+                }
+                source == "pushState" || source == "hashchange" -> {
+                    // SPA 内部路由变化（埋点 / 同步页面状态）
+                    reportRoute(url)
+                }
+            }
+        }
+    }
+}
+```
+
+### 事件触发场景
+
+| 触发源 | `source` 值 | 是否同步拦截 |
+|---|---|---|
+| 原生导航命中 `urlInterceptSchemes` | `"navigation"` | ✅ cancel |
+| 原生导航命中 `urlInterceptHosts`（含通配符） | `"navigation"` | ✅ cancel |
+| 非标准 scheme（且未命中规则） | `"navigation"` | ✅ cancel + 尝试 system openURL |
+| http/https 且开启 `reportAllNavigation` | `"navigation"` | ❌ 仅感知 |
+| `history.pushState()` | `"pushState"` | ❌ 仅感知 |
+| `history.replaceState()` | `"replaceState"` | ❌ 仅感知 |
+| `popstate` 事件 | `"popstate"` | ❌ 仅感知 |
+| `hashchange` 事件 | `"hashchange"` | ❌ 仅感知 |
+
+### 不能拦截的场景
+
+由于桥接异步特性，以下场景**无法在 Kotlin 侧同步拦下**，业务方需谨慎：
+
+- 服务器 302 重定向到第三方域名（除非提前在 `urlInterceptHosts` 配置）
+- `<form method="POST">` 提交跳转
+- 首次 `src()` 加载的 URL（属于自己设置的 URL，不应被拦）
+
+对这些场景，`stopLoading()` 只能止血，无法回滚已发生的 HTTP 请求。
+
+

@@ -57,6 +57,17 @@ open class KRWebView(context: Context) : FrameLayout(context), IKuiklyRenderView
             )
         }
 
+        // 注册内部 SPA 路由 hook handler：JS 端 hook history.pushState 等通过此 method 上抛，
+        // 转化为 onShouldOverrideUrlLoading 事件，避免穿透到 onMessage / 业务 handler
+        jsBridge.registerNativeHandler(JSBridgeProtocol.INTERNAL_METHOD_NAV_INTERCEPT) { params, callback ->
+            val url = params.optString("url", "")
+            val source = params.optString("source", "navigation")
+            val isMainFrame = params.optBoolean("isMainFrame", true)
+            webViewClient.notifyShouldOverride(url, isMainFrame, source)
+            // 立即 resolve，避免 JS 侧的 Promise 走超时
+            callback.resolve(null)
+        }
+
         // 设置 WebView 默认配置
         webView.settings.apply {
             javaScriptEnabled = true
@@ -120,6 +131,21 @@ open class KRWebView(context: Context) : FrameLayout(context), IKuiklyRenderView
                 webView.settings.mediaPlaybackRequiresUserGesture = (propValue as String) == "false"
                 true
             }
+            "urlInterceptSchemes" -> {
+                webViewClient.interceptSchemes = parseCsvSet(propValue as? String)
+                true
+            }
+            "urlInterceptHosts" -> {
+                // 拆分为精确匹配集合与通配符后缀集合；规则会覆盖旧规则，天然支持运行时动态更新
+                val (exact, suffix) = parseHostRules(propValue as? String)
+                webViewClient.interceptHostsExact = exact
+                webViewClient.interceptHostsSuffix = suffix
+                true
+            }
+            "reportAllNavigation" -> {
+                webViewClient.reportAllNavigation = (propValue as? String) == "true"
+                true
+            }
 
             // --- 事件回调 ---
             KuiklyWebViewEvent.EVENT_PAGE_STARTED -> {
@@ -144,6 +170,10 @@ open class KRWebView(context: Context) : FrameLayout(context), IKuiklyRenderView
             }
             KuiklyWebViewEvent.EVENT_MESSAGE -> {
                 onMessageCallback = propValue as KuiklyRenderCallback
+                true
+            }
+            KuiklyWebViewEvent.EVENT_SHOULD_OVERRIDE_URL_LOADING -> {
+                webViewClient.onShouldOverrideUrlLoadingCallback = propValue as KuiklyRenderCallback
                 true
             }
 
@@ -190,6 +220,10 @@ open class KRWebView(context: Context) : FrameLayout(context), IKuiklyRenderView
                 webView.reload()
                 null
             }
+            "stopLoading" -> {
+                webView.stopLoading()
+                null
+            }
             "canGoBack" -> {
                 callback?.invoke(if (webView.canGoBack()) "true" else "false")
                 null
@@ -209,6 +243,7 @@ open class KRWebView(context: Context) : FrameLayout(context), IKuiklyRenderView
         webViewClient.onPageStartedCallback = null
         webViewClient.onPageFinishedCallback = null
         webViewClient.onErrorCallback = null
+        webViewClient.onShouldOverrideUrlLoadingCallback = null
         webViewClient.jsBridge = null
         webChromeClient.onReceiveTitleCallback = null
         webChromeClient.onProgressChangedCallback = null
@@ -225,4 +260,38 @@ open class KRWebView(context: Context) : FrameLayout(context), IKuiklyRenderView
      * 获取 JSBridge 实例，供外部注册 Native 方法
      */
     fun getJSBridge(): KRWebViewJSBridge = jsBridge
+
+    /**
+     * 解析逗号分隔的字符串为小写、不重复的 Set；空串返回空集合。
+     */
+    private fun parseCsvSet(csv: String?): Set<String> {
+        if (csv.isNullOrBlank()) return emptySet()
+        return csv.split(',')
+            .asSequence()
+            .map { it.trim().lowercase() }
+            .filter { it.isNotEmpty() }
+            .toHashSet()
+    }
+
+    /**
+     * 将 host 规则 CSV 拆分为 (exact, suffix) 两个集合：
+     * - `example.com`      -> 进入 exact
+     * - `*.example.com`    -> 进入 suffix，存为 `example.com`（去掉 `*.` 前缀）
+     * - 空串 / 非法项会被忽略
+     */
+    private fun parseHostRules(csv: String?): Pair<Set<String>, Set<String>> {
+        if (csv.isNullOrBlank()) return emptySet<String>() to emptySet()
+        val exact = HashSet<String>()
+        val suffix = HashSet<String>()
+        for (raw in csv.split(',')) {
+            val trimmed = raw.trim().lowercase()
+            if (trimmed.isEmpty()) continue
+            if (trimmed.startsWith("*.") && trimmed.length > 2) {
+                suffix.add(trimmed.substring(2))
+            } else {
+                exact.add(trimmed)
+            }
+        }
+        return exact to suffix
+    }
 }

@@ -3,6 +3,7 @@
 #import "KRComponentDefine.h"
 
 static NSString *const kNativeHandlerName = @"KuiklyNativeHandler";
+static NSString *const kInternalMethodNavIntercept = @"__kuiklyNavIntercept";
 
 /**
  * 共享 WKProcessPool 单例
@@ -28,10 +29,18 @@ static dispatch_once_t _processPoolOnceToken;
 @property (nonatomic, copy, nullable) KuiklyRenderCallback css_onReceiveTitle;
 @property (nonatomic, copy, nullable) KuiklyRenderCallback css_onProgressChanged;
 @property (nonatomic, copy, nullable) KuiklyRenderCallback css_onMessage;
+@property (nonatomic, copy, nullable) KuiklyRenderCallback css_onShouldOverrideUrlLoading;
 
 // 属性
 @property (nonatomic, copy, nullable) NSString *css_src;
 @property (nonatomic, copy, nullable) NSString *css_htmlContent;
+
+// URL 拦截规则（同步决策）
+@property (nonatomic, strong) NSSet<NSString *> *interceptSchemes;
+// host 规则拆分：精确匹配 + 通配符后缀（已去掉前缀 `*.`）
+@property (nonatomic, strong) NSSet<NSString *> *interceptHostsExact;
+@property (nonatomic, strong) NSArray<NSString *> *interceptHostsSuffix;
+@property (nonatomic, assign) BOOL reportAllNavigation;
 
 @end
 
@@ -42,6 +51,9 @@ static dispatch_once_t _processPoolOnceToken;
 - (instancetype)init {
     self = [super init];
     if (self) {
+        _interceptSchemes = [NSSet set];
+        _interceptHostsExact = [NSSet set];
+        _interceptHostsSuffix = @[];
         [self setupWebView];
     }
     return self;
@@ -90,6 +102,22 @@ static dispatch_once_t _processPoolOnceToken;
         if (strongSelf.css_onMessage) {
             strongSelf.css_onMessage(@{@"message": message ?: @""});
         }
+    }];
+
+    // 注册内部 SPA 路由 hook handler：JS 端 hook history.pushState 等通过此 method 上抛，
+    // 转化为 onShouldOverrideUrlLoading 事件，避免穿透到 onMessage / 业务 handler
+    [self.jsBridge registerNativeHandler:kInternalMethodNavIntercept
+                                 handler:^(NSDictionary *params, KRBridgeResponseCallback callback) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            if (callback) callback(nil, nil);
+            return;
+        }
+        NSString *url = params[@"url"] ?: @"";
+        NSString *source = params[@"source"] ?: @"navigation";
+        BOOL isMainFrame = params[@"isMainFrame"] ? [params[@"isMainFrame"] boolValue] : YES;
+        [strongSelf notifyShouldOverrideUrlLoading:url isMainFrame:isMainFrame source:source];
+        if (callback) callback(nil, nil);
     }];
 
     // 注册 ScriptMessageHandler
@@ -155,6 +183,34 @@ static dispatch_once_t _processPoolOnceToken;
 
 - (void)setCss_allowsInlineMediaPlayback:(NSString *)allowed {
     // 已在初始化时配置，运行时不可更改
+}
+
+- (void)setCss_urlInterceptSchemes:(NSString *)csv {
+    self.interceptSchemes = [self parseCsvSet:csv];
+}
+
+- (void)setCss_urlInterceptHosts:(NSString *)csv {
+    // 拆分为精确匹配 + 通配符后缀两部分；每次 setter 调用都会完全覆盖旧规则，天然支持运行时动态更新
+    NSMutableSet<NSString *> *exact = [NSMutableSet set];
+    NSMutableArray<NSString *> *suffix = [NSMutableArray array];
+    if (csv.length > 0) {
+        NSArray<NSString *> *parts = [csv componentsSeparatedByString:@","];
+        for (NSString *raw in parts) {
+            NSString *trimmed = [[raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] lowercaseString];
+            if (trimmed.length == 0) continue;
+            if ([trimmed hasPrefix:@"*."] && trimmed.length > 2) {
+                [suffix addObject:[trimmed substringFromIndex:2]];
+            } else {
+                [exact addObject:trimmed];
+            }
+        }
+    }
+    self.interceptHostsExact = [exact copy];
+    self.interceptHostsSuffix = [suffix copy];
+}
+
+- (void)setCss_reportAllNavigation:(NSString *)flag {
+    self.reportAllNavigation = [flag isEqualToString:@"true"];
 }
 
 #pragma mark - CSS Methods (由 KUIKLY_CALL_CSS_METHOD 运行时分发)
@@ -224,6 +280,10 @@ static dispatch_once_t _processPoolOnceToken;
     [self.webView reload];
 }
 
+- (void)css_stopLoading:(NSDictionary *)args {
+    [self.webView stopLoading];
+}
+
 - (void)css_canGoBack:(NSDictionary *)args {
     KuiklyRenderCallback callback = args[KRC_CALLBACK_KEY];
     if (callback) {
@@ -241,20 +301,61 @@ static dispatch_once_t _processPoolOnceToken;
 #pragma mark - WKNavigationDelegate
 
 /**
- * 拦截 URL 加载，处理非标准 scheme（如 baiduboxapp://, weixin:// 等）
- * 避免加载未知 scheme 的 URL 导致错误
+ * 拦截 URL 加载
+ * 决策顺序：
+ * 1. javascript / data / blob / vbscript：始终 cancel（安全防护）
+ * 2. 命中 interceptSchemes：cancel + 上抛事件
+ * 3. 标准 scheme（http/https/about/file）：默认 allow；命中 interceptHosts 则 cancel + 事件；
+ *    reportAllNavigation 开启时不拦但上抛事件
+ * 4. 其他自定义 scheme：上抛事件 + 尝试 system openURL，cancel
  */
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     NSURL *url = navigationAction.request.URL;
-    NSString *scheme = url.scheme.lowercaseString;
-    
-    if ([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"] || [scheme isEqualToString:@"about"] || [scheme isEqualToString:@"file"]) {
-        // 标准协议，允许 WebView 正常加载
+    NSString *scheme = url.scheme.lowercaseString ?: @"";
+    BOOL isMainFrame = navigationAction.targetFrame ? navigationAction.targetFrame.isMainFrame : YES;
+    NSString *urlStr = url.absoluteString ?: @"";
+
+    // 安全防护：始终拦截
+    if ([scheme isEqualToString:@"javascript"] ||
+        [scheme isEqualToString:@"data"] ||
+        [scheme isEqualToString:@"blob"] ||
+        [scheme isEqualToString:@"vbscript"]) {
+        decisionHandler(WKNavigationActionPolicyCancel);
+        return;
+    }
+
+    // 命中自定义 scheme 黑名单：cancel + 上抛事件
+    if (scheme.length > 0 && [self.interceptSchemes containsObject:scheme]) {
+        [self notifyShouldOverrideUrlLoading:urlStr isMainFrame:isMainFrame source:@"navigation"];
+        decisionHandler(WKNavigationActionPolicyCancel);
+        return;
+    }
+
+    BOOL isStandard = [scheme isEqualToString:@"http"] ||
+                      [scheme isEqualToString:@"https"] ||
+                      [scheme isEqualToString:@"about"] ||
+                      [scheme isEqualToString:@"file"];
+
+    if (isStandard) {
+        // 命中 host 黑名单（支持精确 + 通配符子域）：cancel + 上抛
+        if (isMainFrame && (self.interceptHostsExact.count > 0 || self.interceptHostsSuffix.count > 0)) {
+            NSString *host = url.host.lowercaseString;
+            if (host.length > 0 && [self matchHost:host]) {
+                [self notifyShouldOverrideUrlLoading:urlStr isMainFrame:isMainFrame source:@"navigation"];
+                decisionHandler(WKNavigationActionPolicyCancel);
+                return;
+            }
+        }
+        // 仅感知不拦截
+        if (self.reportAllNavigation && isMainFrame) {
+            [self notifyShouldOverrideUrlLoading:urlStr isMainFrame:isMainFrame source:@"navigation"];
+        }
         decisionHandler(WKNavigationActionPolicyAllow);
         return;
     }
     
-    // 非标准 scheme，尝试通过系统打开对应 App
+    // 非标准 scheme，上抛事件 + 尝试通过系统打开对应 App
+    [self notifyShouldOverrideUrlLoading:urlStr isMainFrame:isMainFrame source:@"navigation"];
     @try {
         if ([[UIApplication sharedApplication] canOpenURL:url]) {
             [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
@@ -372,6 +473,59 @@ completionHandler:(void (^)(BOOL))completionHandler {
         responder = [responder nextResponder];
     }
     return nil;
+}
+
+/**
+ * 触发 onShouldOverrideUrlLoading 事件
+ */
+- (void)notifyShouldOverrideUrlLoading:(NSString *)url
+                            isMainFrame:(BOOL)isMainFrame
+                                 source:(NSString *)source {
+    if (self.css_onShouldOverrideUrlLoading) {
+        self.css_onShouldOverrideUrlLoading(@{
+            @"url": url ?: @"",
+            @"isMainFrame": @(isMainFrame),
+            @"source": source ?: @"navigation"
+        });
+    }
+}
+
+/**
+ * 解析逗号分隔的 CSV 字符串为小写、不重复的 NSSet
+ */
+- (NSSet<NSString *> *)parseCsvSet:(NSString *)csv {
+    if (csv.length == 0) return [NSSet set];
+    NSArray<NSString *> *parts = [csv componentsSeparatedByString:@","];
+    NSMutableSet<NSString *> *result = [NSMutableSet setWithCapacity:parts.count];
+    for (NSString *raw in parts) {
+        NSString *trimmed = [[raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] lowercaseString];
+        if (trimmed.length > 0) {
+            [result addObject:trimmed];
+        }
+    }
+    return [result copy];
+}
+
+/**
+ * host 匹配：
+ * 1. 精确匹配 (interceptHostsExact)：host == rule
+ * 2. 通配符匹配 (interceptHostsSuffix)：rule = `*.foo.com` 可匹配 `foo.com` 自身与任意子域
+ */
+- (BOOL)matchHost:(NSString *)host {
+    if ([self.interceptHostsExact containsObject:host]) return YES;
+    if (self.interceptHostsSuffix.count == 0) return NO;
+    NSUInteger hostLen = host.length;
+    for (NSString *suffix in self.interceptHostsSuffix) {
+        // 自身匹配：`*.foo.com` 也能匹配 `foo.com`
+        if ([host isEqualToString:suffix]) return YES;
+        NSUInteger suffixLen = suffix.length;
+        if (hostLen > suffixLen + 1 &&
+            [host hasSuffix:suffix] &&
+            [host characterAtIndex:(hostLen - suffixLen - 1)] == '.') {
+            return YES;
+        }
+    }
+    return NO;
 }
 
 @end

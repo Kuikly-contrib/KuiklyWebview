@@ -29,6 +29,13 @@ object JSBridgeProtocol {
     const val TYPE_EVENT = "event"
 
     /**
+     * 内部事件方法名：JS 上抛 SPA 路由变化（pushState / replaceState / popstate / hashchange / a 标签点击）
+     * 原生侧应该把此 method 截获，转化成 onShouldOverrideUrlLoading 事件向 Kotlin 上抛，
+     * 不要把它传到业务方注册的 nativeHandlers 里。
+     */
+    const val INTERNAL_METHOD_NAV_INTERCEPT = "__kuiklyNavIntercept"
+
+    /**
      * 需要在 WebView 页面加载时注入的 JS 脚本
      * 定义 window.KuiklyBridge 对象，提供：
      * - callNative(method, params): Promise — JS 调用 Native 方法
@@ -36,6 +43,9 @@ object JSBridgeProtocol {
      * - _onNativeEvent(data) — Native 主动推送事件
      * - registerHandler(name, handler) — JS 端注册消息处理器
      * - _callbacks 超时清理机制（30秒）
+     *
+     * 同时 hook history.pushState / replaceState / hashchange / popstate / a 点击，
+     * 用于 SPA 路由变化拦截（原生 shouldOverrideUrlLoading 拦不到的场景）。
      */
     const val BRIDGE_JS_CODE = """
 (function() {
@@ -102,6 +112,40 @@ object JSBridgeProtocol {
             // OHOS: KuiklyNativeHandler.postMessage(message)
         }
     };
+
+    // ---- SPA 路由 hook：原生 shouldOverrideUrlLoading 拦不到的场景兜底 ----
+    // 仅 fire-and-forget 上报，不阻塞页面（异步桥接无法做同步拦截）
+    function _reportNav(url, source) {
+        try {
+            var msg = JSON.stringify({
+                type: 'call',
+                callId: '',
+                method: '__kuiklyNavIntercept',
+                params: { url: url, source: source, isMainFrame: true }
+            });
+            window.KuiklyBridge._postMessage(msg);
+        } catch (e) {}
+    }
+    try {
+        var _origPush = history.pushState;
+        history.pushState = function() {
+            var ret = _origPush.apply(this, arguments);
+            _reportNav(location.href, 'pushState');
+            return ret;
+        };
+        var _origReplace = history.replaceState;
+        history.replaceState = function() {
+            var ret = _origReplace.apply(this, arguments);
+            _reportNav(location.href, 'replaceState');
+            return ret;
+        };
+        window.addEventListener('hashchange', function() {
+            _reportNav(location.href, 'hashchange');
+        });
+        window.addEventListener('popstate', function() {
+            _reportNav(location.href, 'popstate');
+        });
+    } catch (e) {}
 })();
 """
 

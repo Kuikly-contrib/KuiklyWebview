@@ -129,6 +129,13 @@ internal class WebViewDemoPage : BasePager() {
                     src(ctx.currentUrl)
                     javaScriptEnabled(true)
                     domStorageEnabled(true)
+                    // URL 拦截规则示例：
+                    // 1. 命中 myapp:// / tdsworkshop:// 自定义协议时，由原生路由处理（不让 WebView 加载）
+                    urlInterceptSchemes(listOf("myapp", "tdsworkshop"))
+                    // 2. 命中下面 host 的 mainFrame 导航直接拦截，转给原生处理（示例：把 demo.example.com 截走）
+                    urlInterceptHosts(listOf("demo.example.com"))
+                    // 3. 是否对所有 mainFrame 导航都触发感知事件（false=只在命中规则/SPA 路由时触发）
+                    reportAllNavigation(true)
                 }
                 event {
                     onPageStarted { url ->
@@ -148,6 +155,16 @@ internal class WebViewDemoPage : BasePager() {
                     }
                     onMessage { message ->
                         ctx.jsResult = "Message from JS: $message"
+                    }
+                    // URL 拦截感知：来源可能是 navigation / pushState / replaceState / popstate / hashchange
+                    onShouldOverrideUrlLoading { url, isMainFrame, source ->
+                        ctx.jsResult = "[$source] mainFrame=$isMainFrame url=$url"
+                        // 业务示例：自定义 scheme 已被原生侧 cancel + 上抛，可在此处调起原生路由
+                        // if (url.startsWith("myapp://")) {
+                        //     ctx.acquireModule<BridgeModule>(BridgeModule.MODULE_NAME).openPage(url)
+                        // }
+                        // 业务示例：被命中规则的 https 也已被 cancel，可以直接路由跳转
+                        // if (url.contains("demo.example.com/order/")) { ... }
                     }
                 }
             }

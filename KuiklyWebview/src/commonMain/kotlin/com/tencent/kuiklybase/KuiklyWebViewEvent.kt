@@ -57,6 +57,34 @@ class KuiklyWebViewEvent : Event() {
     }
 
     /**
+     * URL 加载拦截感知事件（异步通知，非同步拦截）
+     *
+     * 注意：Kuikly 的事件回调是异步的，因此此事件**不能**像原生
+     * `WebViewClient.shouldOverrideUrlLoading` 那样通过返回值阻止加载。
+     * 它的语义是「即将发生 / 已经发生导航的感知」，由原生侧基于 attr 中下发的
+     * 同步规则（[KuiklyWebViewAttr.urlInterceptSchemes] 等）决定是否真正拦截。
+     *
+     * 触发时机：
+     * - 原生 mainFrame 导航（http/https/自定义 scheme），此时 `source = "navigation"`
+     * - SPA 内部路由变化：`source = "pushState" / "replaceState" / "popstate" / "hashchange"`
+     *
+     * @param handler 回调参数：
+     *   - url: 即将加载或已加载的 URL
+     *   - isMainFrame: 是否为主框架（iframe 内的导航为 false）
+     *   - source: 触发来源，便于业务区分
+     */
+    fun onShouldOverrideUrlLoading(handler: (url: String, isMainFrame: Boolean, source: String) -> Unit) {
+        register(EVENT_SHOULD_OVERRIDE_URL_LOADING) {
+            val params = it as? JSONObject ?: JSONObject()
+            handler(
+                params.optString("url", ""),
+                params.optBoolean("isMainFrame", true),
+                params.optString("source", "navigation")
+            )
+        }
+    }
+
+    /**
      * 页面加载进度变化时触发
      * @param handler 回调，参数为进度值（0-100）
      */
@@ -85,5 +113,6 @@ class KuiklyWebViewEvent : Event() {
         const val EVENT_RECEIVE_TITLE = "onReceiveTitle"
         const val EVENT_PROGRESS_CHANGED = "onProgressChanged"
         const val EVENT_MESSAGE = "onMessage"
+        const val EVENT_SHOULD_OVERRIDE_URL_LOADING = "onShouldOverrideUrlLoading"
     }
 }

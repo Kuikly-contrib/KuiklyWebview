@@ -3,6 +3,9 @@ import { webview } from '@kit.ArkWeb';
 /**
  * 预缓存的完整 JSBridge 注入脚本（BRIDGE_JS_CODE + OHOS_POST_MESSAGE_JS 合并）
  * 避免每次注入时拼接字符串
+ *
+ * 含 KuiklyBridge 桥接定义 + SPA 路由 hook（pushState/replaceState/popstate/hashchange
+ * 上抛 __kuiklyNavIntercept），与 commonMain JSBridgeProtocol.BRIDGE_JS_CODE 保持一致
  */
 const CACHED_BRIDGE_SCRIPT: string =
   `(function() {
@@ -66,6 +69,38 @@ const CACHED_BRIDGE_SCRIPT: string =
             window.KuiklyNativeHandler.postMessage(message);
         }
     };
+
+    function _reportNav(url, source) {
+        try {
+            var msg = JSON.stringify({
+                type: 'call',
+                callId: '',
+                method: '__kuiklyNavIntercept',
+                params: { url: url, source: source, isMainFrame: true }
+            });
+            window.KuiklyBridge._postMessage(msg);
+        } catch (e) {}
+    }
+    try {
+        var _origPush = history.pushState;
+        history.pushState = function() {
+            var ret = _origPush.apply(this, arguments);
+            _reportNav(location.href, 'pushState');
+            return ret;
+        };
+        var _origReplace = history.replaceState;
+        history.replaceState = function() {
+            var ret = _origReplace.apply(this, arguments);
+            _reportNav(location.href, 'replaceState');
+            return ret;
+        };
+        window.addEventListener('hashchange', function() {
+            _reportNav(location.href, 'hashchange');
+        });
+        window.addEventListener('popstate', function() {
+            _reportNav(location.href, 'popstate');
+        });
+    } catch (e) {}
 })();`;
 
 /**

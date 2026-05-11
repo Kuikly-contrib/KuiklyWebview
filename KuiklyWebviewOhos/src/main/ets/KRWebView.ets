@@ -39,6 +39,13 @@ export class KRWebView extends KuiklyRenderBaseView {
   cssUserAgent: string = '';
   cssDomStorageEnabled: boolean = true;
 
+  // URL 拦截规则
+  cssUrlInterceptSchemes: Set<string> = new Set();
+  // host 规则拆分：精确匹配 + 通配符后缀（已去掉前缀 `*.`）
+  cssUrlInterceptHostsExact: Set<string> = new Set();
+  cssUrlInterceptHostsSuffix: Array<string> = [];
+  cssReportAllNavigation: boolean = false;
+
   // 事件回调
   onPageStartedCallback: KuiklyRenderCallback | null = null;
   onPageFinishedCallback: KuiklyRenderCallback | null = null;
@@ -46,6 +53,7 @@ export class KRWebView extends KuiklyRenderBaseView {
   onReceiveTitleCallback: KuiklyRenderCallback | null = null;
   onProgressChangedCallback: KuiklyRenderCallback | null = null;
   onMessageCallback: KuiklyRenderCallback | null = null;
+  onShouldOverrideUrlLoadingCallback: KuiklyRenderCallback | null = null;
 
   // 是否已初始化 controller
   private isControllerInitialized: boolean = false;
@@ -63,7 +71,88 @@ export class KRWebView extends KuiklyRenderBaseView {
           this.onMessageCallback({ 'message': message });
         }
       });
+      // 注册内部 SPA 路由 hook handler：JS 端 hook history.pushState 等通过此 method 上抛，
+      // 转化为 onShouldOverrideUrlLoading 事件，避免穿透到 onMessage / 业务 handler
+      this.jsBridge.registerNativeHandler('__kuiklyNavIntercept', (params, callback) => {
+        const url = (params['url'] as string) || '';
+        const source = (params['source'] as string) || 'navigation';
+        const isMainFrame = (params['isMainFrame'] as boolean) ?? true;
+        this.notifyShouldOverride(url, isMainFrame, source);
+        callback.resolve(null);
+      });
     }
+  }
+
+  /**
+   * 触发 onShouldOverrideUrlLoading 事件（OHOS 内部 helper）
+   */
+  notifyShouldOverride(url: string, isMainFrame: boolean, source: string): void {
+    if (this.onShouldOverrideUrlLoadingCallback) {
+      this.onShouldOverrideUrlLoadingCallback({
+        'url': url,
+        'isMainFrame': isMainFrame,
+        'source': source
+      });
+    }
+  }
+
+  /**
+   * 解析逗号分隔的字符串为小写 Set
+   */
+  private parseCsvSet(csv: string): Set<string> {
+    const result = new Set<string>();
+    if (!csv || csv.length === 0) return result;
+    const parts = csv.split(',');
+    for (const raw of parts) {
+      const trimmed = raw.trim().toLowerCase();
+      if (trimmed.length > 0) {
+        result.add(trimmed);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * 解析 host 规则 CSV 为 (exact, suffix) 两部分。
+   * - `example.com`     -> exact
+   * - `*.example.com`   -> suffix，存为 `example.com`（去掉 `*.`）
+   */
+  private parseHostRules(csv: string): [Set<string>, Array<string>] {
+    const exact = new Set<string>();
+    const suffix: Array<string> = [];
+    if (!csv || csv.length === 0) return [exact, suffix];
+    const parts = csv.split(',');
+    for (const raw of parts) {
+      const trimmed = raw.trim().toLowerCase();
+      if (trimmed.length === 0) continue;
+      if (trimmed.startsWith('*.') && trimmed.length > 2) {
+        suffix.push(trimmed.substring(2));
+      } else {
+        exact.add(trimmed);
+      }
+    }
+    return [exact, suffix];
+  }
+
+  /**
+   * host 匹配：
+   * 1. 精确匹配：host == rule
+   * 2. 通配符匹配：rule = `*.foo.com` 可匹配 `foo.com` 自身与任意子域
+   */
+  matchHost(host: string): boolean {
+    if (this.cssUrlInterceptHostsExact.has(host)) return true;
+    if (this.cssUrlInterceptHostsSuffix.length === 0) return false;
+    const hostLen = host.length;
+    for (const suffix of this.cssUrlInterceptHostsSuffix) {
+      if (host === suffix) return true;
+      const suffixLen = suffix.length;
+      if (hostLen > suffixLen + 1 &&
+        host.endsWith(suffix) &&
+        host.charAt(hostLen - suffixLen - 1) === '.') {
+        return true;
+      }
+    }
+    return false;
   }
 
   createArkUIView(): ComponentContent<KuiklyRenderBaseView> {
@@ -122,6 +211,22 @@ export class KRWebView extends KuiklyRenderBaseView {
         // OHOS Web 组件默认支持内联播放
         return true;
 
+      case 'urlInterceptSchemes':
+        this.cssUrlInterceptSchemes = this.parseCsvSet(propValue as string);
+        return true;
+
+      case 'urlInterceptHosts': {
+        // 每次 setProp 都会用新规则覆盖旧规则，天然支持运行时动态更新
+        const [exact, suffix] = this.parseHostRules(propValue as string);
+        this.cssUrlInterceptHostsExact = exact;
+        this.cssUrlInterceptHostsSuffix = suffix;
+        return true;
+      }
+
+      case 'reportAllNavigation':
+        this.cssReportAllNavigation = (propValue as string) === 'true';
+        return true;
+
       // 事件回调
       case 'onPageStarted':
         this.onPageStartedCallback = propValue as KuiklyRenderCallback;
@@ -145,6 +250,10 @@ export class KRWebView extends KuiklyRenderBaseView {
 
       case 'onMessage':
         this.onMessageCallback = propValue as KuiklyRenderCallback;
+        return true;
+
+      case 'onShouldOverrideUrlLoading':
+        this.onShouldOverrideUrlLoadingCallback = propValue as KuiklyRenderCallback;
         return true;
 
       default:
@@ -243,6 +352,17 @@ export class KRWebView extends KuiklyRenderBaseView {
         return null;
       }
 
+      case 'stopLoading': {
+        if (this.isControllerInitialized) {
+          try {
+            this.controller.stop();
+          } catch (e) {
+            console.error('KRWebView: Failed to stop loading', JSON.stringify(e));
+          }
+        }
+        return null;
+      }
+
       case 'canGoBack': {
         if (callback && this.isControllerInitialized) {
           try {
@@ -284,6 +404,7 @@ export class KRWebView extends KuiklyRenderBaseView {
     this.onReceiveTitleCallback = null;
     this.onProgressChangedCallback = null;
     this.onMessageCallback = null;
+    this.onShouldOverrideUrlLoadingCallback = null;
   }
 
   /**
@@ -352,6 +473,55 @@ struct KRWebViewComponent {
       .javaScriptProxy(this.renderView.getJavaScriptProxyConfig())
       .onControllerAttached(() => {
         this.renderView.onWebControllerReady();
+      })
+      .onLoadIntercept((event) => {
+        // 同步拦截：基于 attr 下发的规则匹配，命中则 cancel 加载并上抛事件
+        // 不命中或事件回调缺失则放行
+        const req = event?.data;
+        if (!req) return false;
+        let url = '';
+        try {
+          url = req.getRequestUrl() ?? '';
+        } catch (e) {
+          return false;
+        }
+        const isMainFrame = req.isMainFrame ? req.isMainFrame() : true;
+        if (!url || url.length === 0) return false;
+
+        // 解析 scheme / host
+        const schemeEnd = url.indexOf(':');
+        const scheme = schemeEnd > 0 ? url.substring(0, schemeEnd).toLowerCase() : '';
+        let host = '';
+        const hostStart = url.indexOf('://');
+        if (hostStart > 0) {
+          const rest = url.substring(hostStart + 3);
+          const hostEnd = rest.search(/[\/\?#]/);
+          host = (hostEnd > 0 ? rest.substring(0, hostEnd) : rest).toLowerCase();
+          // 去端口
+          const portIdx = host.indexOf(':');
+          if (portIdx > 0) host = host.substring(0, portIdx);
+        }
+
+        const schemeHit = scheme.length > 0 && this.renderView.cssUrlInterceptSchemes.has(scheme);
+        const hostHit = isMainFrame && host.length > 0 && this.renderView.matchHost(host);
+        if (schemeHit || hostHit) {
+          this.renderView.notifyShouldOverride(url, isMainFrame, 'navigation');
+          return true;
+        }
+
+        // 标准 scheme 放行；按需上抛感知事件
+        const isStandard = scheme === 'http' || scheme === 'https' || scheme === 'about' || scheme === 'file';
+        if (isStandard) {
+          if (this.renderView.cssReportAllNavigation && isMainFrame) {
+            this.renderView.notifyShouldOverride(url, isMainFrame, 'navigation');
+          }
+          return false;
+        }
+
+        // 非标准 scheme：上抛事件 + 拦截（OHOS 不像 Android/iOS 那样默认尝试系统打开，
+        // 业务可在事件回调里自行调用 BridgeModule.openPage 等做处理）
+        this.renderView.notifyShouldOverride(url, isMainFrame, 'navigation');
+        return true;
       })
       .onPageBegin((event) => {
         if (this.renderView.onPageStartedCallback) {

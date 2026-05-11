@@ -108,6 +108,33 @@ class KuiklyWebView : DeclarativeBaseView<KuiklyWebViewAttr, KuiklyWebViewEvent>
     }
 
     /**
+     * 停止当前加载（**事后兜底**，而非同步拦截手段）
+     *
+     * 本方法主要用于配合 [KuiklyWebViewEvent.onShouldOverrideUrlLoading] 在
+     * [KuiklyWebViewAttr.reportAllNavigation] 模式下的**止血**场景：业务通过事件
+     * 感知到某次 http(s) 导航需要阻止时，可以调用此方法中断后续加载。
+     *
+     * **重要限制**：
+     * - Kuikly 桥接是异步的：原生侧触发导航 → 上抛事件到 Kotlin → 回传 stopLoading
+     *   命令到原生，这整条链路存在桥接延迟。在命令到达前，WebView 已经可能：
+     *     * 发起了 HTTP 请求（含 Cookie / Referer）
+     *     * 开始解析了响应 HTML
+     *     * 触发了 `history` 变化
+     * - 调用 stopLoading **只能止血，无法回滚已发出的网络请求 / 已修改的 History**
+     *
+     * **如果业务需要「真正的同步拦截」**，请优先配置：
+     * - [KuiklyWebViewAttr.urlInterceptSchemes]：拦自定义协议
+     * - [KuiklyWebViewAttr.urlInterceptHosts]：拦特定域名（支持 `*.example.com` 通配符）
+     *
+     * 这两个同步规则在原生侧匹配时直接 cancel 加载，完全不会有 HTTP 请求外发。
+     */
+    fun stopLoading() {
+        performTaskWhenRenderViewDidLoad {
+            renderView?.callMethod("stopLoading", null)
+        }
+    }
+
+    /**
      * 查询是否可以后退
      * @param callback 结果回调，"true" 或 "false"
      */
