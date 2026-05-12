@@ -45,6 +45,10 @@ export class KRWebView extends KuiklyRenderBaseView {
   cssUrlInterceptHostsExact: Set<string> = new Set();
   cssUrlInterceptHostsSuffix: Array<string> = [];
   cssReportAllNavigation: boolean = false;
+  // 是否允许组件对未命中规则的非标准 scheme 自动 cancel（默认即 cancel，OHOS 不额外唤起）；
+  // 该字段目前仅用于对齐 API（OHOS Web 组件本身不具备直接唤起第三方应用的能力），
+  // 行为差异详见 README。
+  cssAutoOpenExternalScheme: boolean = false;
 
   // 事件回调
   onPageStartedCallback: KuiklyRenderCallback | null = null;
@@ -155,6 +159,38 @@ export class KRWebView extends KuiklyRenderBaseView {
     return false;
   }
 
+  /**
+   * 从 URL 字符串里解析出 (scheme, host)，均返回小写、去端口；
+   * host 部分会剥离 `user:pass@` 这样的 userinfo，避免把凭据误当作 host。
+   *
+   * 示例：
+   * - `https://u:p@m.example.com:8080/a` → `["https", "m.example.com"]`
+   * - `weixin://...`                      → `["weixin", ""]`
+   * - `mailto:foo@bar.com`                → `["mailto", ""]`（无 `://`）
+   */
+  parseSchemeAndHost(url: string): [string, string] {
+    const schemeEnd = url.indexOf(':');
+    const scheme = schemeEnd > 0 ? url.substring(0, schemeEnd).toLowerCase() : '';
+    let host = '';
+    const hostStart = url.indexOf('://');
+    if (hostStart > 0) {
+      let authority = url.substring(hostStart + 3);
+      const authorityEnd = authority.search(/[\/\?#]/);
+      if (authorityEnd >= 0) {
+        authority = authority.substring(0, authorityEnd);
+      }
+      // 剥离 userinfo：`user:pass@host:port` → `host:port`
+      const atIdx = authority.lastIndexOf('@');
+      if (atIdx >= 0) {
+        authority = authority.substring(atIdx + 1);
+      }
+      // 去端口
+      const portIdx = authority.indexOf(':');
+      host = (portIdx > 0 ? authority.substring(0, portIdx) : authority).toLowerCase();
+    }
+    return [scheme, host];
+  }
+
   createArkUIView(): ComponentContent<KuiklyRenderBaseView> {
     const uiContext = this.getUIContext() as UIContext;
     return new ComponentContent<KuiklyRenderBaseView>(
@@ -225,6 +261,10 @@ export class KRWebView extends KuiklyRenderBaseView {
 
       case 'reportAllNavigation':
         this.cssReportAllNavigation = (propValue as string) === 'true';
+        return true;
+
+      case 'autoOpenExternalScheme':
+        this.cssAutoOpenExternalScheme = (propValue as string) === 'true';
         return true;
 
       // 事件回调
@@ -488,19 +528,9 @@ struct KRWebViewComponent {
         const isMainFrame = req.isMainFrame ? req.isMainFrame() : true;
         if (!url || url.length === 0) return false;
 
-        // 解析 scheme / host
-        const schemeEnd = url.indexOf(':');
-        const scheme = schemeEnd > 0 ? url.substring(0, schemeEnd).toLowerCase() : '';
-        let host = '';
-        const hostStart = url.indexOf('://');
-        if (hostStart > 0) {
-          const rest = url.substring(hostStart + 3);
-          const hostEnd = rest.search(/[\/\?#]/);
-          host = (hostEnd > 0 ? rest.substring(0, hostEnd) : rest).toLowerCase();
-          // 去端口
-          const portIdx = host.indexOf(':');
-          if (portIdx > 0) host = host.substring(0, portIdx);
-        }
+        const parsed = this.renderView.parseSchemeAndHost(url);
+        const scheme = parsed[0];
+        const host = parsed[1];
 
         const schemeHit = scheme.length > 0 && this.renderView.cssUrlInterceptSchemes.has(scheme);
         const hostHit = isMainFrame && host.length > 0 && this.renderView.matchHost(host);
@@ -518,8 +548,8 @@ struct KRWebViewComponent {
           return false;
         }
 
-        // 非标准 scheme：上抛事件 + 拦截（OHOS 不像 Android/iOS 那样默认尝试系统打开，
-        // 业务可在事件回调里自行调用 BridgeModule.openPage 等做处理）
+        // 非标准 scheme 且未命中规则：上抛事件 + cancel。OHOS Web 组件本身不具备唤起第三方应用
+        // 的能力，业务需在 onShouldOverrideUrlLoading 里自行调用原生桥实现唤起。
         this.renderView.notifyShouldOverride(url, isMainFrame, 'navigation');
         return true;
       })

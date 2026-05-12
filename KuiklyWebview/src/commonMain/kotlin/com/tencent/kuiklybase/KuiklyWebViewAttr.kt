@@ -122,4 +122,22 @@ class KuiklyWebViewAttr : Attr() {
         "reportAllNavigation" with if (enabled) "true" else "false"
         return this
     }
+
+    /**
+     * 是否允许组件自动尝试通过系统唤起第三方 App 处理非标准 scheme（如 `weixin://`、
+     * `mqqapi://`、`intent://` 等未被 [urlInterceptSchemes] 命中的自定义协议）。
+     *
+     * - `false`（默认，**推荐**）：未命中规则的非标准 scheme 仅 cancel 加载并上抛事件，
+     *   是否唤起外部 App 完全由业务在 [KuiklyWebViewEvent.onShouldOverrideUrlLoading]
+     *   里自行调用 RouterModule / IntentModule 决定。更安全、合规。
+     * - `true`：保留旧版便利行为——组件**内部**直接 `startActivity(Intent.VIEW)` / iOS
+     *   `openURL:`。风险：可能被页面里的恶意链接（如广告里的 `market://`）滥用唤起外部
+     *   应用，且用户无法感知。仅当你的 WebView 承载的内容完全可信时再开启。
+     *
+     * **支持运行时动态更新**。
+     */
+    fun autoOpenExternalScheme(enabled: Boolean): KuiklyWebViewAttr {
+        "autoOpenExternalScheme" with if (enabled) "true" else "false"
+        return this
+    }
 }

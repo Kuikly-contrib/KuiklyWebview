@@ -17,13 +17,14 @@ import java.util.Locale
  * 拦截页面导航事件，通过 KuiklyRenderCallback 通知 Kotlin 共享层
  *
  * URL 拦截策略（同步决策，与 OHOS / iOS 行为对齐）：
- * 1. javascript / data / blob / vbscript：始终拦截（安全防护）
- * 2. http / https / about / file：标准 scheme 默认放行；如果命中 [interceptHosts] 则
- *    cancel 加载并上抛 `onShouldOverrideUrlLoading` 事件；如果开启 [reportAllNavigation]
- *    则放行的同时也上抛事件供业务感知
- * 3. 其他自定义 scheme（如 weixin://、myapp://）：
- *    - 命中 [interceptSchemes]：cancel + 上抛事件，由业务方决定如何处理
- *    - 未命中：保持现有行为，尝试通过系统 Intent 打开对应应用
+ * 1. `javascript` / `data` / `blob` / `vbscript`：**始终拦截**（安全防护）
+ * 2. 命中 [interceptSchemes]：cancel + 上抛事件
+ * 3. 标准 scheme（`http` / `https` / `about` / `file`）：
+ *    - mainFrame 命中 [interceptHostsExact] / [interceptHostsSuffix]：cancel + 上抛事件
+ *    - 未命中：放行；若开启 [reportAllNavigation] 且 mainFrame，则附带上抛事件（仅感知）
+ * 4. 其他自定义 scheme（如 `weixin://`、`myapp://`）：cancel + 上抛事件；
+ *    仅当显式开启 [autoOpenExternalScheme] 时，组件才会**额外**尝试用系统 Intent 唤起外部 App
+ *    （默认关闭，避免 WebView 被嵌入第三方页面时擅自唤起应用的安全/合规风险）
  */
 class KRWebViewClient : WebViewClient() {
 
@@ -65,10 +66,6 @@ class KRWebViewClient : WebViewClient() {
      */
     var interceptHostsSuffix: Set<String> = emptySet()
 
-    /** 是否存在任何 host 拦截规则（判空优化，避免每次导航都调用 isEmpty 两次） */
-    private val hasAnyHostRule: Boolean
-        get() = interceptHostsExact.isNotEmpty() || interceptHostsSuffix.isNotEmpty()
-
     /**
      * 是否对所有 mainFrame 导航都触发事件（仅感知，不拦截 http/https）。
      * 默认 false：只在命中规则或非标准 scheme 时触发。
@@ -76,8 +73,34 @@ class KRWebViewClient : WebViewClient() {
     var reportAllNavigation: Boolean = false
 
     /**
-     * 拦截 URL 加载，处理非标准 scheme（如 baiduboxapp://, weixin:// 等）
-     * 避免 net::ERR_UNKNOWN_URL_SCHEME 错误直接显示在 WebView 中
+     * 是否允许组件自动用系统 Intent 唤起外部 App 处理未命中规则的非标准 scheme。
+     * 默认 false（安全优先）。详见 KuiklyWebViewAttr.autoOpenExternalScheme 的说明。
+     */
+    var autoOpenExternalScheme: Boolean = false
+
+    /**
+     * SPA hash 变更去重：记录上一次上抛的 URL，
+     * 如果 JS hook 刚刚通过 `__kuiklyNavIntercept` 上抛过同一个 URL，
+     * 紧接着 WebView 原生 [shouldOverrideUrlLoading] 又上抛一次 hash 跳转，则吞掉后一次，
+     * 避免业务收到重复事件。iOS 的 WKWebView 不会对 hashchange 走 decidePolicy，无此问题。
+     */
+    @Volatile
+    private var lastSpaRoutedUrl: String? = null
+
+    /**
+     * 告知拦截器：刚刚通过 SPA hook 上抛了一个 url，紧接着的原生导航若 url 相同则不再重复上抛。
+     * 由 JSBridge 的 `__kuiklyNavIntercept` handler 调用。
+     */
+    fun markSpaRouted(url: String) {
+        lastSpaRoutedUrl = url
+    }
+
+    /**
+     * 拦截 URL 加载
+     *
+     * 对 302 重定向的行为：Android WebView 在 302 跳转后会**再次**触发本方法
+     * （request.isRedirect == true，API 24+），因此跳转后的新 URL 会重新走一次
+     * 下面的规则匹配，命中的 host 仍能被正确拦截。
      */
     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
         val url = request?.url?.toString() ?: return false
@@ -97,31 +120,41 @@ class KRWebViewClient : WebViewClient() {
 
         // 标准 scheme：原则上放行，但若 host 命中则 cancel
         if (STANDARD_SCHEMES.contains(scheme)) {
-            if (isMainFrame && hasAnyHostRule) {
+            // mainFrame 上命中 host 规则 → 同步拦截
+            if (isMainFrame &&
+                (interceptHostsExact.isNotEmpty() || interceptHostsSuffix.isNotEmpty())
+            ) {
                 val host = request.url?.host?.lowercase(Locale.ROOT)
                 if (host != null && matchHost(host)) {
                     notifyShouldOverride(url, isMainFrame, "navigation")
                     return true
                 }
             }
-            // 仅感知不拦截
+            // 未命中规则：放行；若开启 reportAllNavigation 则附带感知事件
             if (reportAllNavigation && isMainFrame) {
+                // 如果是 SPA hook 刚上抛过的同一个 URL，说明这是 hashchange/pushState 带出的
+                // 重复原生事件，吞掉避免双发
+                if (consumeSpaRoutedIfMatches(url)) {
+                    return false
+                }
                 notifyShouldOverride(url, isMainFrame, "navigation")
             }
             return false
         }
 
-        // 非标准 scheme（且未命中 interceptSchemes）：保持原有行为，尝试通过系统 Intent 打开
-        // 同时上抛事件让业务感知（业务可在事件回调里做埋点）
+        // 非标准 scheme（且未命中 interceptSchemes）：上抛事件 + cancel，由业务决定是否唤起外部 App。
+        // 仅当业务显式开启 autoOpenExternalScheme 时，组件才额外尝试用系统 Intent 打开。
         notifyShouldOverride(url, isMainFrame, "navigation")
-        try {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            if (intent.resolveActivity(view?.context?.packageManager ?: return true) != null) {
-                view.context.startActivity(intent)
+        if (autoOpenExternalScheme) {
+            try {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                if (intent.resolveActivity(view?.context?.packageManager ?: return true) != null) {
+                    view.context.startActivity(intent)
+                }
+            } catch (e: Exception) {
+                // 没有应用能处理该 scheme，静默忽略
             }
-        } catch (e: Exception) {
-            // 没有应用能处理该 scheme，静默忽略
         }
         return true
     }
@@ -137,6 +170,18 @@ class KRWebViewClient : WebViewClient() {
                 put("source", source)
             }
         )
+    }
+
+    /**
+     * 若 [url] 与上次 SPA hook 标记的相同，则消费标记并返回 true（表示应吞掉这次事件）。
+     */
+    private fun consumeSpaRoutedIfMatches(url: String): Boolean {
+        val last = lastSpaRoutedUrl ?: return false
+        if (last == url) {
+            lastSpaRoutedUrl = null
+            return true
+        }
+        return false
     }
 
     /**

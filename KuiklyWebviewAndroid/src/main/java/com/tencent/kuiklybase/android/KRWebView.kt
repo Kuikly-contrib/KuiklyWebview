@@ -63,6 +63,11 @@ open class KRWebView(context: Context) : FrameLayout(context), IKuiklyRenderView
             val url = params.optString("url", "")
             val source = params.optString("source", "navigation")
             val isMainFrame = params.optBoolean("isMainFrame", true)
+            // 记录本次 SPA 路由 URL，供 shouldOverrideUrlLoading 做重复去重
+            // （Android WebView 对 hashchange 会同时触发原生 decidePolicy，双发问题见 KRWebViewClient 注释）
+            if (url.isNotEmpty()) {
+                webViewClient.markSpaRouted(url)
+            }
             webViewClient.notifyShouldOverride(url, isMainFrame, source)
             // 立即 resolve，避免 JS 侧的 Promise 走超时
             callback.resolve(null)
@@ -144,6 +149,10 @@ open class KRWebView(context: Context) : FrameLayout(context), IKuiklyRenderView
             }
             "reportAllNavigation" -> {
                 webViewClient.reportAllNavigation = (propValue as? String) == "true"
+                true
+            }
+            "autoOpenExternalScheme" -> {
+                webViewClient.autoOpenExternalScheme = (propValue as? String) == "true"
                 true
             }
 

@@ -41,6 +41,8 @@ static dispatch_once_t _processPoolOnceToken;
 @property (nonatomic, strong) NSSet<NSString *> *interceptHostsExact;
 @property (nonatomic, strong) NSArray<NSString *> *interceptHostsSuffix;
 @property (nonatomic, assign) BOOL reportAllNavigation;
+// 是否允许组件自动 openURL 唤起外部 App（默认 NO）
+@property (nonatomic, assign) BOOL autoOpenExternalScheme;
 
 @end
 
@@ -213,6 +215,10 @@ static dispatch_once_t _processPoolOnceToken;
     self.reportAllNavigation = [flag isEqualToString:@"true"];
 }
 
+- (void)setCss_autoOpenExternalScheme:(NSString *)flag {
+    self.autoOpenExternalScheme = [flag isEqualToString:@"true"];
+}
+
 #pragma mark - CSS Methods (由 KUIKLY_CALL_CSS_METHOD 运行时分发)
 
 - (void)css_loadUrl:(NSDictionary *)args {
@@ -354,14 +360,17 @@ static dispatch_once_t _processPoolOnceToken;
         return;
     }
     
-    // 非标准 scheme，上抛事件 + 尝试通过系统打开对应 App
+    // 非标准 scheme（且未命中 interceptSchemes）：上抛事件 + cancel；
+    // 仅当业务显式开启 autoOpenExternalScheme 时，组件才额外尝试通过系统 openURL 打开
     [self notifyShouldOverrideUrlLoading:urlStr isMainFrame:isMainFrame source:@"navigation"];
-    @try {
-        if ([[UIApplication sharedApplication] canOpenURL:url]) {
-            [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+    if (self.autoOpenExternalScheme) {
+        @try {
+            if ([[UIApplication sharedApplication] canOpenURL:url]) {
+                [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+            }
+        } @catch (NSException *exception) {
+            // 静默忽略
         }
-    } @catch (NSException *exception) {
-        // 静默忽略
     }
     decisionHandler(WKNavigationActionPolicyCancel);
 }
@@ -370,6 +379,39 @@ static dispatch_once_t _processPoolOnceToken;
     if (self.css_onPageStarted) {
         self.css_onPageStarted(@{@"url": webView.URL.absoluteString ?: @""});
     }
+}
+
+/**
+ * 302 重定向二次拦截：
+ *
+ * WKWebView 的 `decidePolicyForNavigationAction:` 在 302 跳转后并不会带上最新 URL 再触发一次，
+ * 导致「原始 URL 未命中规则、但跳转后的 Location 命中」这种场景漏拦。
+ * 这里在收到响应时再做一次 host 匹配：命中则 cancel，并补发 onShouldOverrideUrlLoading 事件。
+ *
+ * 只做 host 匹配（mainFrame + 标准 scheme）；scheme 类规则不在这里处理，
+ * 因为 302 到非标准 scheme 的链路在 decidePolicyForNavigationAction 已经处理过。
+ */
+- (void)webView:(WKWebView *)webView
+decidePolicyForNavigationResponse:(WKNavigationResponse *)navigationResponse
+decisionHandler:(void (^)(WKNavigationResponsePolicy))decisionHandler {
+    NSURL *url = navigationResponse.response.URL;
+    NSString *scheme = url.scheme.lowercaseString ?: @"";
+    BOOL isMainFrame = navigationResponse.isForMainFrame;
+    BOOL isStandard = [scheme isEqualToString:@"http"] ||
+                      [scheme isEqualToString:@"https"] ||
+                      [scheme isEqualToString:@"about"] ||
+                      [scheme isEqualToString:@"file"];
+    if (isMainFrame && isStandard &&
+        (self.interceptHostsExact.count > 0 || self.interceptHostsSuffix.count > 0)) {
+        NSString *host = url.host.lowercaseString;
+        if (host.length > 0 && [self matchHost:host]) {
+            NSString *urlStr = url.absoluteString ?: @"";
+            [self notifyShouldOverrideUrlLoading:urlStr isMainFrame:isMainFrame source:@"navigation"];
+            decisionHandler(WKNavigationResponsePolicyCancel);
+            return;
+        }
+    }
+    decisionHandler(WKNavigationResponsePolicyAllow);
 }
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {

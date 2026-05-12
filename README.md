@@ -245,8 +245,9 @@ webViewRef.view?.sendMessageToJS("onDataReady", """{"key":"value"}""")
 | `userAgent(ua)` | `String` | 自定义 User-Agent |
 | `allowsInlineMediaPlayback(allowed)` | `Boolean` | 是否允许内联媒体播放，默认 `true` |
 | `urlInterceptSchemes(schemes)` | `List<String>` | 需要由原生拦截的 scheme 列表（命中即 cancel + 上抛事件），mainFrame 与 iframe 都生效 |
-| `urlInterceptHosts(hosts)` | `List<String>` | 需要拦截的 host 列表，**支持 `*.example.com` 通配符**（仅作用于 mainFrame） |
+| `urlInterceptHosts(hosts)` | `List<String>` | 需要拦截的 host 列表，**支持 `*.example.com` 通配符**（仅作用于 mainFrame，对 302 跳转后的目标 host 也生效） |
 | `reportAllNavigation(enabled)` | `Boolean` | 是否对所有 mainFrame 导航都触发事件（仅感知，不拦截 http/https），默认 `false` |
+| `autoOpenExternalScheme(enabled)` | `Boolean` | 是否允许组件自动唤起外部 App 处理未命中规则的非标准 scheme（如 `weixin://`），**默认 `false`**。默认行为：cancel + 上抛事件，由业务自行决定是否唤起 |
 
 ### `event { }` 事件
 
@@ -283,12 +284,24 @@ KuiklyWebview 提供两层 URL 拦截能力，覆盖原生导航和 SPA 路由�
 
 ### 设计要点
 
-由于 Kuikly 桥接是**单向异步**的，无法像原生 `WebViewClient.shouldOverrideUrlLoading` 那样通过返回值同步阻断加载。本组件采用 **"原生侧同步规则下发 + 异步事件感知"** 组合方案：
+由于 Kuikly 桥接是**单向异步**的，无法像原生 `WebViewClient.shouldOverrideUrlLoading` 那样通过返回值同步阻断加载。本组件的拦截能力分为两层：
 
-1. **`urlInterceptSchemes` / `urlInterceptHosts`**：规则下发到原生层，原生侧**同步**判断、命中即 cancel 加载，同时上抛事件
-2. **`onShouldOverrideUrlLoading`**：异步事件，用于业务感知；命中规则、非标准 scheme、SPA 路由变化都会触发
-3. **`stopLoading()`**：**事后兜底**——业务在事件回调里发现需要阻止某次 http(s) 加载时可调用，但由于桥接异步，**不能阻止已发出的 HTTP 请求，也不能回滚已修改的 History**。能真正做到"零请求外发"的拦截方式是配置同步规则 (`urlInterceptSchemes` / `urlInterceptHosts`)
-4. **SPA 路由 hook**：组件内置 JS hook（`history.pushState` / `replaceState` / `popstate` / `hashchange`），原生 `shouldOverrideUrlLoading` 拦不到的 SPA 内部路由也能通过事件上抛
+- **同步规则层**：`urlInterceptSchemes` / `urlInterceptHosts` 下发到原生层，命中即 cancel 加载，**零请求外发**。这是真正意义上的"拦截"。host 规则在 iOS 端会在响应阶段（`decidePolicyForNavigationResponse`）做一次二次校验，覆盖 302 重定向后的目标 host；Android 端 WebView 自身会对 302 后的新 URL 重新触发 `shouldOverrideUrlLoading`，无需额外处理。
+- **异步感知层**：`onShouldOverrideUrlLoading` 事件，用于业务监听。事件来源包括原生导航、SPA 路由变化（组件内置 `history.pushState` / `replaceState` / `popstate` / `hashchange` 的 JS hook，Android 上对 hashchange 已做去重，避免与原生事件双发）。
+
+> `stopLoading()` 不属于上述任何一层，它是**事后兜底**：由于桥接异步，无法阻止已发出的 HTTP 请求、也无法回滚已修改的 History。要做到真正的同步拦截，请使用同步规则层。
+
+### 非标准 scheme 默认行为
+
+未命中 `urlInterceptSchemes` 的非标准 scheme（如 `weixin://`、`mqqapi://`、`intent://` 等）默认行为是 **cancel 加载 + 上抛事件**，由业务在 `onShouldOverrideUrlLoading` 里自行决定是否唤起外部 App。这样可以避免 WebView 嵌入第三方页面（广告、UGC 内容）时，被恶意链接擅自唤起应用。
+
+如需保留组件自动唤起的便利行为（**仅在 WebView 承载内容完全可信时**）可显式开启：
+
+```kotlin
+attr {
+    autoOpenExternalScheme(true)   // 默认 false
+}
+```
 
 ### host 匹配语法
 
@@ -383,11 +396,11 @@ WebView {
 
 ### 不能拦截的场景
 
-由于桥接异步特性，以下场景**无法在 Kotlin 侧同步拦下**，业务方需谨慎：
+由于桥接异步特性 / 平台 API 限制，以下场景**无法在 Kotlin 侧拦下**，业务方需谨慎：
 
-- 服务器 302 重定向到第三方域名（除非提前在 `urlInterceptHosts` 配置）
-- `<form method="POST">` 提交跳转
-- 首次 `src()` 加载的 URL（属于自己设置的 URL，不应被拦）
+- 未在 `urlInterceptHosts` 中配置的服务器 302 重定向（已配置的 host 在三端都会被同步拦截，包括 iOS 通过 `decidePolicyForNavigationResponse` 二次校验）
+- `<form method="POST">` 提交跳转（payload 已发出）
+- 首次 `src()` 加载的 URL（属于业务自己设置的 URL，不应被拦）
 
 对这些场景，`stopLoading()` 只能止血，无法回滚已发生的 HTTP 请求。
 
