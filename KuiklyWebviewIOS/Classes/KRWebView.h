@@ -1,6 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
-#import "KuiklyRenderViewExportProtocol.h"
+#import <KuiklyIOSRender/KuiklyRenderViewExportProtocol.h>
 
 @class KRWebViewJSBridge;
 

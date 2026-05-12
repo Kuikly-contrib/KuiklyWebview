@@ -1,6 +1,6 @@
 #import "KRWebView.h"
 #import "KRWebViewJSBridge.h"
-#import "KRComponentDefine.h"
+#import <KuiklyIOSRender/KRComponentDefine.h>
 
 static NSString *const kNativeHandlerName = @"KuiklyNativeHandler";
 static NSString *const kInternalMethodNavIntercept = @"__kuiklyNavIntercept";
