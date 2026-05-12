@@ -15,11 +15,21 @@ repositories {
 }
 
 dependencies {
-    implementation("com.tencent.kuiklybase:KuiklyWebview:1.0.0-2.0.21")
+    implementation("com.tencent.kuiklybase:KuiklyWebview:1.0.1-2.0.21")
 }
 ```
 
-> 该依赖为 Kotlin Multiplatform 产物，包含 Android、iOS、JS 等平台的 DSL 定义，各平台原生实现需额外引入（见下方各端接入章节）。
+在 KMP 共享模块的 `build.ohos.gradle.kts` 中添加鸿蒙构建 Maven 仓库和依赖：
+```kotlin
+repositories {
+    maven { url = uri("https://mirrors.tencent.com/nexus/repository/maven-tencent") }
+}
+
+dependencies {
+    implementation("com.tencent.kuiklybase:KuiklyWebview:1.0.1-2.0.21-KBA-010")
+}
+```
+
 
 ---
 
@@ -30,7 +40,7 @@ dependencies {
 在 Android 宿主工程中引入原生实现：
 
 ```kotlin
-implementation("com.tencent.kuiklybase:kuikly-webview-android:1.0.0-2.0.21")
+implementation("com.tencent.kuiklybase:kuikly-webview-android:1.0.1-2.0.21")
 ```
 
 ### 2. 注册原生视图
