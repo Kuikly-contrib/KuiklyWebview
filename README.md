@@ -404,4 +404,140 @@ WebView {
 
 对这些场景，`stopLoading()` 只能止血，无法回滚已发生的 HTTP 请求。
 
+### 端到端示例
+
+下面给出一个**可直接运行的完整页面**，演示了 URL 拦截在真实业务里如何分流处理：
+
+- 自定义 scheme（`myapp://`、`tdsworkshop://`）→ 走原生路由
+- 命中业务 host（`*.pay.example.com` 等）→ 弹原生确认框，再走原生
+- SPA 路由变化 → 仅埋点
+- 运行时切换 `autoOpenExternalScheme`，演示动态更新 attr
+
+```kotlin
+@Page("WebViewDemo")
+internal class WebViewDemoPage : BasePager() {
+
+    private var pageTitle by observable("加载中...")
+    private var progress by observable(0)
+    private var isLoading by observable(false)
+    private var autoOpenExternal by observable(false)
+    private var interceptLog by observableList<String>()
+    private lateinit var webViewRef: ViewRef<KuiklyWebView>
+
+    private fun bridge() = acquireModule<BridgeModule>(BridgeModule.MODULE_NAME)
+
+    private fun appendLog(line: String) {
+        interceptLog.add(0, line)
+        while (interceptLog.size > 5) interceptLog.removeAt(interceptLog.size - 1)
+    }
+
+    override fun body(): ViewBuilder {
+        val ctx = this
+        return {
+            // —— 顶部测试工具条：注入 JS 模拟前端发起不同导航 ——
+            View {
+                attr { flexDirectionRow(); height(40f) }
+                Text {
+                    attr { flex(1f); text("scheme"); textAlignCenter() }
+                    event { click {
+                        ctx.webViewRef.view?.evaluateJavaScript(
+                            "window.location.href='myapp://order/123';"
+                        )
+                    } }
+                }
+                Text {
+                    attr { flex(1f); text("host"); textAlignCenter() }
+                    event { click {
+                        ctx.webViewRef.view?.evaluateJavaScript(
+                            "window.location.href='https://demo.example.com/order/42';"
+                        )
+                    } }
+                }
+                Text {
+                    attr { flex(1f); text("pushState"); textAlignCenter() }
+                    event { click {
+                        ctx.webViewRef.view?.evaluateJavaScript(
+                            "history.pushState({}, '', '/spa/page-' + Date.now());"
+                        )
+                    } }
+                }
+                Text {
+                    attr { flex(1.2f); text("autoOpen: " + if (ctx.autoOpenExternal) "ON" else "OFF") }
+                    event { click { ctx.autoOpenExternal = !ctx.autoOpenExternal } }
+                }
+            }
+
+            // —— WebView 主体 ——
+            WebView {
+                ref { ctx.webViewRef = it }
+                attr {
+                    flex(1f)
+                    src("https://app.example.com/")
+                    javaScriptEnabled(true)
+                    domStorageEnabled(true)
+
+                    // ① 自定义 scheme：命中即原生 cancel，零请求外发
+                    urlInterceptSchemes(listOf("myapp", "tdsworkshop"))
+
+                    // ② 业务域名：mainFrame 命中即 cancel，支持 *. 通配
+                    urlInterceptHosts(listOf("demo.example.com", "*.pay.example.com"))
+
+                    // ③ 想感知所有 mainFrame 导航做埋点（不拦截 http/https）
+                    reportAllNavigation(true)
+
+                    // ④ 运行时切换：是否允许组件自动唤起外部 App
+                    autoOpenExternalScheme(ctx.autoOpenExternal)
+                }
+                event {
+                    onPageStarted { ctx.isLoading = true }
+                    onPageFinished { ctx.isLoading = false }
+                    onReceiveTitle { ctx.pageTitle = it }
+                    onProgressChanged { ctx.progress = it }
+
+                    // —— 业务侧分流处理 ——
+                    onShouldOverrideUrlLoading { url, isMainFrame, source ->
+                        when {
+                            // 1) 自定义 scheme → 原生路由
+                            url.startsWith("myapp://") || url.startsWith("tdsworkshop://") -> {
+                                ctx.appendLog("⇢ scheme $url")
+                                ctx.bridge().openPage(url)        // 实际走业务路由
+                            }
+
+                            // 2) 命中 host → 弹原生确认框
+                            url.contains("demo.example.com") || url.contains(".pay.example.com") -> {
+                                ctx.appendLog("⇢ host $url")
+                                ctx.bridge().showAlert(
+                                    title = "拦截到外跳",
+                                    message = "目标：$url\n要在原生侧打开吗？",
+                                    leftBtnTitle = "取消",
+                                    rightBtnTitle = "原生打开"
+                                ) { idx ->
+                                    if (idx == 1) ctx.bridge().openPage(url)
+                                }
+                            }
+
+                            // 3) SPA 路由变化 → 仅埋点
+                            source != "navigation" -> ctx.appendLog("◇ SPA[$source] $url")
+
+                            // 4) reportAllNavigation 模式下的常规导航
+                            else -> ctx.appendLog("· nav $url")
+                        }
+                    }
+                }
+            }
+
+            // —— 拦截日志 ——
+            vfor({ ctx.interceptLog }) { line ->
+                Text { attr { text(line); fontSize(11f) } }
+            }
+        }
+    }
+}
+```
+
+完整版（含返回/刷新/进度条/夜间模式）见
+[`WebViewDemoPage.kt`](shared/src/commonMain/kotlin/com/tencent/kuiklybase/WebViewDemoPage.kt)，可直接在 demo 工程里运行。
+
+
+
 
