@@ -1,6 +1,6 @@
 {
   "name": "@yuki8273/webview-ohos",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "KuiklyWebView OHOS native implementation based on Web component",
 "main": "Index.ets",
   "author": "yuki8273",

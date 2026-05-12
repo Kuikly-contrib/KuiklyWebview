@@ -9,3 +9,10 @@
 - 支持事件：onPageStarted、onPageFinished、onError、onReceiveTitle、onProgressChanged、onMessage
 - 命令式 API：loadUrl、loadHtml、evaluateJavaScript、goBack、goForward、reload、canGoBack、canGoForward
 - KRWebViewJSBridge：内置 JSBridge，JS 端通过 window.KuiklyBridge 与 Native 双向通信
+
+
+## [1.0.1] - 2026-05-12
+
+### Added
+
+- 新增url拦截功能

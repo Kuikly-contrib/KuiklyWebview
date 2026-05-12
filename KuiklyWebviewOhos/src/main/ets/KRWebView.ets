@@ -117,25 +117,26 @@ export class KRWebView extends KuiklyRenderBaseView {
   }
 
   /**
-   * 解析 host 规则 CSV 为 (exact, suffix) 两部分。
-   * - `example.com`     -> exact
-   * - `*.example.com`   -> suffix，存为 `example.com`（去掉 `*.`）
+   * 解析 host 规则 CSV，分别填充到传入的精确集合与通配后缀数组中。
+   * - `example.com`     -> exactOut
+   * - `*.example.com`   -> suffixOut，存为 `example.com`（去掉 `*.`）
+   *
+   * 用 out 参数而不是返回元组 / 对象，是为了规避 ArkTS 不支持解构声明的限制。
    */
-  private parseHostRules(csv: string): [Set<string>, Array<string>] {
-    const exact = new Set<string>();
-    const suffix: Array<string> = [];
-    if (!csv || csv.length === 0) return [exact, suffix];
+  private parseHostRules(csv: string, exactOut: Set<string>, suffixOut: Array<string>): void {
+    exactOut.clear();
+    suffixOut.length = 0;
+    if (!csv || csv.length === 0) return;
     const parts = csv.split(',');
     for (const raw of parts) {
       const trimmed = raw.trim().toLowerCase();
       if (trimmed.length === 0) continue;
       if (trimmed.startsWith('*.') && trimmed.length > 2) {
-        suffix.push(trimmed.substring(2));
+        suffixOut.push(trimmed.substring(2));
       } else {
-        exact.add(trimmed);
+        exactOut.add(trimmed);
       }
     }
-    return [exact, suffix];
   }
 
   /**
@@ -251,13 +252,14 @@ export class KRWebView extends KuiklyRenderBaseView {
         this.cssUrlInterceptSchemes = this.parseCsvSet(propValue as string);
         return true;
 
-      case 'urlInterceptHosts': {
+      case 'urlInterceptHosts':
         // 每次 setProp 都会用新规则覆盖旧规则，天然支持运行时动态更新
-        const [exact, suffix] = this.parseHostRules(propValue as string);
-        this.cssUrlInterceptHostsExact = exact;
-        this.cssUrlInterceptHostsSuffix = suffix;
+        this.parseHostRules(
+          propValue as string,
+          this.cssUrlInterceptHostsExact,
+          this.cssUrlInterceptHostsSuffix
+        );
         return true;
-      }
 
       case 'reportAllNavigation':
         this.cssReportAllNavigation = (propValue as string) === 'true';
