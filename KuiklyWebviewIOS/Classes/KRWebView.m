@@ -264,7 +264,10 @@ static dispatch_once_t _processPoolOnceToken;
                         resultStr = [NSString stringWithFormat:@"%@", result];
                     }
                 }
-                callback(resultStr ?: @"");
+                // 用字典包一层，避免 Kuikly 桥接对"看起来像 JSON 对象的纯字符串"
+                // 自动尝试反序列化导致 JSONException。对端在 KuiklyWebView.evaluateJavaScript
+                // 里会取出 result 字段后再回调业务。
+                callback(@{ @"result": resultStr ?: @"" });
             }
         }];
     }

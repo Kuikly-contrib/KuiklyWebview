@@ -2,6 +2,7 @@ package com.tencent.kuiklybase
 
 import com.tencent.kuikly.core.base.DeclarativeBaseView
 import com.tencent.kuikly.core.base.ViewContainer
+import com.tencent.kuikly.core.nvi.serialization.json.JSONObject
 
 /**
  * KuiklyWebView 跨端 WebView 组件
@@ -69,12 +70,21 @@ class KuiklyWebView : DeclarativeBaseView<KuiklyWebViewAttr, KuiklyWebViewEvent>
      * 执行 JavaScript 代码
      * @param script JS 代码
      * @param callback 执行结果回调（可选）
+     *
+     * 注意：原生侧会把 JS 返回值包装成 `{"result": <value>}` 的 JSONObject 回传，
+     * 这是为了规避 Kuikly 桥接对"看起来像 JSON 对象的纯字符串"自动反序列化的问题。
+     * 这里负责把 result 字段解包出来再交给业务，对业务调用方完全透明。
      */
     fun evaluateJavaScript(script: String, callback: ((String?) -> Unit)? = null) {
         performTaskWhenRenderViewDidLoad {
             renderView?.callMethod("evaluateJavaScript", script, callback?.let { cb ->
                 { result: Any? ->
-                    cb(result?.toString())
+                    val unwrapped: String? = when (result) {
+                        null -> null
+                        is JSONObject -> result.optString("result", "")
+                        else -> result.toString()
+                    }
+                    cb(unwrapped)
                 }
             })
         }

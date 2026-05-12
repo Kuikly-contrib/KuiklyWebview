@@ -2,6 +2,7 @@ package com.tencent.kuiklybase.android
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.webkit.CookieManager
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -91,6 +92,13 @@ open class KRWebView(context: Context) : FrameLayout(context), IKuiklyRenderView
 
         // 启用硬件加速渲染层，提升滚动和动画流畅度
         webView.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
+
+        // Cookie 默认配置：
+        // - 启用 cookie 持久化，否则连最基础的同站登录态都不会保留
+        // - 启用第三方 cookie，跨站 SSO 流程（业务域 → passport.xxx.com → 回跳）必须依赖此项；
+        //   Android Lollipop 起默认关闭，需要显式打开。组件作为 WebView 通用容器，默认放行更符合"浏览器对齐"的预期。
+        CookieManager.getInstance().setAcceptCookie(true)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
 
         // 绑定客户端
         webViewClient.jsBridge = jsBridge
@@ -212,7 +220,10 @@ open class KRWebView(context: Context) : FrameLayout(context), IKuiklyRenderView
             "evaluateJavaScript" -> {
                 params?.let { script ->
                     webView.evaluateJavascript(script) { result ->
-                        callback?.invoke(result)
+                        // 用 JSONObject 包一层，避免 Kuikly 桥接对"看起来像 JSON 对象的纯字符串"
+                        // 自动尝试反序列化导致 String cannot be converted to JSONObject 异常。
+                        // 对端在 KuiklyWebView.evaluateJavaScript 里会取出 result 字段后再回调业务。
+                        callback?.invoke(JSONObject().apply { put("result", result ?: "") })
                     }
                 }
                 null
