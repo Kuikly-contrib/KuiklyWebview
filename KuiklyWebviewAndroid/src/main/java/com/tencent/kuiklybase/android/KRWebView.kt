@@ -245,11 +245,11 @@ open class KRWebView(context: Context) : FrameLayout(context), IKuiklyRenderView
                 null
             }
             "canGoBack" -> {
-                callback?.invoke(if (webView.canGoBack()) "true" else "false")
+                callback?.invoke(JSONObject().apply { put("result", webView.canGoBack()) })
                 null
             }
             "canGoForward" -> {
-                callback?.invoke(if (webView.canGoForward()) "true" else "false")
+                callback?.invoke(JSONObject().apply { put("result", webView.canGoForward()) })
                 null
             }
             else -> super.call(method, params, callback)

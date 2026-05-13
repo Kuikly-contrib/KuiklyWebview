@@ -296,14 +296,14 @@ static dispatch_once_t _processPoolOnceToken;
 - (void)css_canGoBack:(NSDictionary *)args {
     KuiklyRenderCallback callback = args[KRC_CALLBACK_KEY];
     if (callback) {
-        callback(self.webView.canGoBack ? @"true" : @"false");
+        callback(@{ @"result": @(self.webView.canGoBack) });
     }
 }
 
 - (void)css_canGoForward:(NSDictionary *)args {
     KuiklyRenderCallback callback = args[KRC_CALLBACK_KEY];
     if (callback) {
-        callback(self.webView.canGoForward ? @"true" : @"false");
+        callback(@{ @"result": @(self.webView.canGoForward) });
     }
 }
 

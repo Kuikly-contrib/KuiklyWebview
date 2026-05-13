@@ -146,26 +146,38 @@ class KuiklyWebView : DeclarativeBaseView<KuiklyWebViewAttr, KuiklyWebViewEvent>
 
     /**
      * 查询是否可以后退
-     * @param callback 结果回调，"true" 或 "false"
+     * @param callback 结果回调，true / false
      */
     fun canGoBack(callback: (Boolean) -> Unit) {
         performTaskWhenRenderViewDidLoad {
             renderView?.callMethod("canGoBack", null) { result: Any? ->
-                callback(result?.toString() == "true")
+                callback(unwrapBoolResult(result))
             }
         }
     }
 
     /**
      * 查询是否可以前进
-     * @param callback 结果回调，"true" 或 "false"
+     * @param callback 结果回调，true / false
      */
     fun canGoForward(callback: (Boolean) -> Unit) {
         performTaskWhenRenderViewDidLoad {
             renderView?.callMethod("canGoForward", null) { result: Any? ->
-                callback(result?.toString() == "true")
+                callback(unwrapBoolResult(result))
             }
         }
+    }
+
+    /**
+     * 解包原生回传的 `{"result": <Boolean>}` 协议。
+     * 兼容三种返回形态：JSONObject / 已经被桥接转成 Map / 兜底字符串。
+     */
+    private fun unwrapBoolResult(result: Any?): Boolean = when (result) {
+        null -> false
+        is JSONObject -> result.optString("result", "false") == "true" ||
+                result.optBoolean("result", false)
+        is Map<*, *> -> result["result"]?.toString() == "true"
+        else -> result.toString() == "true"
     }
 
     /**

@@ -411,9 +411,9 @@ export class KRWebView extends KuiklyRenderBaseView {
       case 'canGoBack': {
         if (callback && this.isControllerInitialized) {
           try {
-            callback(this.controller.accessBackward() ? 'true' : 'false');
+            callback({ result: this.controller.accessBackward() });
           } catch (e) {
-            callback('false');
+            callback({ result: false });
           }
         }
         return null;
@@ -422,9 +422,9 @@ export class KRWebView extends KuiklyRenderBaseView {
       case 'canGoForward': {
         if (callback && this.isControllerInitialized) {
           try {
-            callback(this.controller.accessForward() ? 'true' : 'false');
+            callback({ result: this.controller.accessForward() });
           } catch (e) {
-            callback('false');
+            callback({ result: false });
           }
         }
         return null;
