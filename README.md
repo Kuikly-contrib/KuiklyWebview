@@ -40,7 +40,7 @@ dependencies {
 在 Android 宿主工程中引入原生实现：
 
 ```kotlin
-implementation("com.tencent.kuiklybase:kuikly-webview-android:1.0.2-2.0.21")
+implementation("com.tencent.kuiklybase:KuiklyWebviewAndroid:1.0.2-2.0.21")
 ```
 
 ### 2. 注册原生视图

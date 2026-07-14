@@ -35,7 +35,7 @@ android {
 
 dependencies {
     implementation(project(":shared"))
-    implementation(project(":KuiklyWebviewAndroid"))
+    implementation("com.tencent.kuiklybase:KuiklyWebviewAndroid:1.0.2-2.0.21")
 
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("androidx.core:core-ktx:1.13.1")
