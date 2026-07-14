@@ -35,7 +35,7 @@ afterEvaluate {
         publications {
             create<MavenPublication>("release") {
                 from(components["release"])
-                artifactId = "kuikly-webview-android"
+                artifactId = "KuiklyWebviewAndroid"
             }
         }
         repositories {
