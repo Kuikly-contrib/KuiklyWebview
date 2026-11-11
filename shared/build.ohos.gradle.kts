@@ -1,7 +1,9 @@
 plugins {
     kotlin("multiplatform")
     kotlin("native.cocoapods")
+    kotlin("plugin.compose")
     id("com.android.library")
+    id("org.jetbrains.compose")
     id("com.google.devtools.ksp")
     id("maven-publish")
 
@@ -44,9 +46,11 @@ kotlin {
 
     sourceSets {
         val commonMain by getting {
+            kotlin.srcDir("src/composeDemo/kotlin")
             dependencies {
                 implementation("com.tencent.kuikly-open:core:${Version.getKuiklyOhosVersion()}")
                 implementation("com.tencent.kuikly-open:core-annotations:${Version.getKuiklyOhosVersion()}")
+                implementation("com.tencent.kuikly-open:compose:${Version.getKuiklyOhosVersion()}")
                 implementation(project(":KuiklyWebview"))
             }
         }

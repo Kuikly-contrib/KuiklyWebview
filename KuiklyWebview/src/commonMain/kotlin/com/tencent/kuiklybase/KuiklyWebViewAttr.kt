@@ -9,6 +9,32 @@ import com.tencent.kuikly.core.base.Attr
 class KuiklyWebViewAttr : Attr() {
 
     /**
+     * 声明 WebView 内被可点击 Compose overlay 覆盖的区域列表。
+     *
+     * 每个矩形都会在原生 WebView 容器内阻挡触摸：网页内容仍会绘制到这些区域，
+     * 但 WebView 不再收到该区域的原生触摸；Compose overlay 的 pointer input 仍由
+     * Kuikly SuperTouch 正常分发。每次调用完全覆盖上一组区域，适合动画和横竖屏。
+     */
+    fun touchShields(rects: List<TouchShieldRect>): KuiklyWebViewAttr {
+        "touchShields" with rects.joinToString("|") { it.serialize() }
+        return this
+    }
+
+    /**
+     * 底部整宽工具栏的快捷写法，等价于声明一个 `BOTTOM_STRETCH` 区域。
+     *
+     * @param heightDp 工具栏高度，单位 dp；传 0 表示关闭该快捷区域
+     */
+    fun touchShieldBottom(heightDp: Float): KuiklyWebViewAttr {
+        val height = maxOf(0f, heightDp)
+        return if (height <= 0f) {
+            touchShields(emptyList())
+        } else {
+            touchShields(listOf(TouchShieldRect.bottomBand(0f, height)))
+        }
+    }
+
+    /**
      * 设置要加载的 URL
      * @param url 网页地址
      */

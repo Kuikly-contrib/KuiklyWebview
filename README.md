@@ -15,7 +15,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.tencent.kuiklybase:KuiklyWebview:1.0.2-2.0.21")
+    implementation("com.tencent.kuiklybase:KuiklyWebview:1.0.4-2.0.21")
 }
 ```
 
@@ -26,7 +26,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.tencent.kuiklybase:KuiklyWebview:1.0.2-2.0.21-KBA-010")
+    implementation("com.tencent.kuiklybase:KuiklyWebview:1.0.4-2.0.21-KBA-010")
 }
 ```
 
@@ -40,7 +40,7 @@ dependencies {
 在 Android 宿主工程中引入原生实现：
 
 ```kotlin
-implementation("com.tencent.kuiklybase:KuiklyWebviewAndroid:1.0.2-2.0.21")
+implementation("com.tencent.kuiklybase:KuiklyWebviewAndroid:1.0.4-2.0.21")
 ```
 
 ### 2. 注册原生视图
@@ -61,7 +61,7 @@ KuiklyRenderCore.registerView("KRWebView") { KRWebView(context) }
 
 ```ruby
 # 方式一：从 GitHub 引入（推荐）
-pod 'KuiklyWebviewIOS', :git => 'https://github.com/Kuikly-contrib/KuiklyWebview.git', :tag => '1.0.0'
+pod 'KuiklyWebviewIOS', :git => 'https://github.com/Kuikly-contrib/KuiklyWebview.git', :tag => '1.0.4'
 ```
 
 然后执行：
@@ -83,7 +83,7 @@ iOS 端的 `KRWebView` 遵循 `KuiklyRenderViewExportProtocol` 协议，**通过
 ### 1. 安装依赖
 
 ```bash
-ohpm install @yuki8273/webview-ohos
+ohpm install @yuki8273/webview-ohos@1.0.4
 ```
 
 ### 2. 注册原生视图
@@ -250,6 +250,8 @@ webViewRef.view?.sendMessageToJS("onDataReady", """{"key":"value"}""")
 |---|---|---|
 | `src(url)` | `String` | 设置加载的 URL |
 | `htmlContent(html)` | `String` | 直接加载 HTML 字符串 |
+| `touchShields(rects)` | `List<TouchShieldRect>` | 声明任意数量的触摸遮挡区域；网页内容仍可见，但原生 WebView 不再接收区域内的触摸。每次调用覆盖上一组区域 |
+| `touchShieldBottom(heightDp)` | `Float` | 底部整宽工具栏快捷写法，等价于一个 `BOTTOM_STRETCH` 区域；传 `0` 清空所有区域 |
 | `javaScriptEnabled(enabled)` | `Boolean` | 是否启用 JavaScript，默认 `true` |
 | `domStorageEnabled(enabled)` | `Boolean` | 是否启用 DOM Storage，默认 `true` |
 | `userAgent(ua)` | `String` | 自定义 User-Agent |
@@ -547,6 +549,88 @@ internal class WebViewDemoPage : BasePager() {
 
 完整版（含返回/刷新/进度条/夜间模式）见
 [`WebViewDemoPage.kt`](shared/src/commonMain/kotlin/com/tencent/kuiklybase/WebViewDemoPage.kt)，可直接在 demo 工程里运行。
+
+---
+
+## WebView 悬浮工具栏点击穿透复现
+
+`WebViewTouchPassthroughDemo` 页面演示 Kuikly Compose 工具栏与 `KWebView` 物理重叠时的组件级修复，提供 `Fixed` / `Regions` / `Baseline` / `Padding` 四种模式。`Fixed` 用通用 `touchShields` 声明底部工具栏区域；`Regions` 同时声明顶部、左侧和底部区域，展示任意位置/多区域能力；`Baseline` 不启用修复；`Padding` 使用物理避让。运行和观测步骤见
+[`home-webview-toolbar-touch-passthrough-repro.md`](docs/home-webview-toolbar-touch-passthrough-repro.md)。
+
+Demo 源码布局：`commonMain/kotlin` 放 core DSL 页面，`composeDemo/kotlin` 放依赖 Kuikly Compose 的穿透复现页面。主构建和 OHOS 独立 link 都通过各自 `build.gradle.kts` 的 `kotlin.srcDir("src/composeDemo/kotlin")` 挂入后者；OHOS 使用 `kotlin("plugin.compose") 2.0.21-KBA-010`、`org.jetbrains.compose 1.7.3` 和 `com.tencent.kuikly-open:compose:2.30.0-2.0.21-ohos`，因此 `libshared.so` 会同样注册 `router` 页面。
+
+底部工具栏快捷写法：
+
+```kotlin
+WebView {
+    attr {
+        src("https://www.baidu.com/")
+        touchShieldBottom(96f) // 与覆盖在 WebView 上的可点击 Compose 工具栏高度一致
+    }
+}
+```
+
+任意位置、多区域写法：
+
+```kotlin
+WebView {
+    attr {
+        src("https://www.baidu.com/")
+        touchShields(
+            listOf(
+                TouchShieldRect(height = 96f, align = TouchShieldAlign.BOTTOM_STRETCH),
+                TouchShieldRect(height = 48f, align = TouchShieldAlign.TOP_STRETCH),
+                TouchShieldRect(width = 72f, align = TouchShieldAlign.LEFT_STRETCH),
+                TouchShieldRect(
+                    x = 16f,
+                    y = 120f,
+                    width = 160f,
+                    height = 44f,
+                    align = TouchShieldAlign.TOP_RIGHT,
+                ),
+            )
+        )
+    }
+}
+```
+
+### `TouchShieldRect`
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `x` / `y` | `Float` | 区域在对应锚点下的偏移量，单位 dp / pt / vp |
+| `width` / `height` | `Float` | 区域尺寸；`*_STRETCH` 模式下只需声明对应方向尺寸 |
+| `align` | `TouchShieldAlign` | 区域锚点，默认 `TOP_LEFT` |
+
+`TouchShieldAlign` 支持：`TOP_LEFT`、`TOP_RIGHT`、`BOTTOM_LEFT`、`BOTTOM_RIGHT`、`BOTTOM_STRETCH`、`TOP_STRETCH`、`LEFT_STRETCH`、`RIGHT_STRETCH`。`BOTTOM_STRETCH` 等拉伸模式不需要业务计算 WebView 实时宽高；`x` / `y` 表示两侧 inset。
+
+行为约定：
+
+- 屏幕渲染不受影响：WebView 内容仍绘制到遮挡区域下方，保留悬浮视觉。
+- 区域内：原生 WebView 不接收 DOWN / MOVE / UP / CANCEL；Compose overlay 的 pointer input 仍由 Kuikly SuperTouch 正常分发。
+- 区域外：WebView 保持正常点击、滚动和输入。
+- 运行时更新：每次 `touchShields(...)` 覆盖旧区域；适合弹层展开/收起、横竖屏和动态尺寸。
+- 多指保护：Android 会按 pointerId 跟踪从遮挡区域内开始的手势，直到 UP / CANCEL，避免拖出区域后漏给 WebView。
+- 平台状态：Android 已实现并真机验证；iOS 已实现多透明区域 View，并通过 `xcodebuild -scheme iosApp -sdk iphonesimulator` 编译；OHOS 已实现 `Stack + position + onTouch(stopPropagation)` 多区域透明触摸层，并通过 DevEco hvigor `assembleHar` 编译。iOS/OHOS 的设备手势回归仍建议在发布前补做。
+
+### iOS 依赖版本
+
+使用 Kuikly `2.30.0` Compose Demo 时，iOS 渲染器必须同步使用 `OpenKuiklyIOSRender 2.30.0`。当前 `iosApp/Podfile` 与 `KuiklyWebviewIOS.podspec` 已对齐；若停留在 `2.7.0`，新版 `shared` framework 会链接失败并提示缺少 `com_tencent_kuikly_IsCurrentOnContextThread` / `com_tencent_kuikly_ScheduleContextTask`。
+
+### OHOS 依赖版本
+
+OHOS 渲染器 `@kuikly-open/render` 必须与 Gradle 侧 Kuikly core 短版本一致。当前 `buildSrc` 使用 `2.30.0`（OHOS 坐标 `2.30.0-2.0.21-ohos`），因此 `KuiklyWebviewOhos/oh-package.json5`、`ohosApp/entry/oh-package.json5` 及 OHPM 锁文件都固定为 `2.30.0`。
+
+不要把 OHOS 渲染器留在 `2.7.0`：`libshared.so` 与 `libkuikly.so` 通过 `com_tencent_kuikly_SetCallKotlin` / `com_tencent_kuikly_CallNative` 直接交换 C ABI 数据，两个版本间的 `KRRenderCValue` / `KRJSON` 表示和 `DidInit()` 参数约定不兼容。错配会在 `KRRenderCore::DidInit()` 创建页面之前触发 `SIGSEGV`，表现为应用启动约 2 秒即崩溃，而不是 WebView 白屏或页面代码报错。升级依赖后需重新执行 `ohpm install --all`、重新 link `libshared.so`、清理 HAP 构建缓存并重装新 HAP。
+
+> 兼容兜底：不升级组件时仍可用 `Modifier.padding(bottom = toolbarHeight)` 做物理避让，但 WebView 内容不会再延伸到工具栏下方。
+
+```bash
+./gradlew :androidApp:assembleDebug
+adb install -r androidApp/build/outputs/apk/debug/androidApp-debug.apk
+adb shell am start -n com.tencent.kuiklybase/com.tencent.kuiklybase.KuiklyRenderActivity \
+  --es pageName WebViewTouchPassthroughDemo
+```
 
 
 

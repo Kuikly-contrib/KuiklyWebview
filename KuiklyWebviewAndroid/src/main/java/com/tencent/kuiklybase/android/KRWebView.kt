@@ -2,6 +2,10 @@ package com.tencent.kuiklybase.android
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.RectF
+import android.util.SparseBooleanArray
+import android.view.MotionEvent
+import android.view.View
 import android.webkit.CookieManager
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -44,6 +48,12 @@ open class KRWebView(context: Context) : FrameLayout(context), IKuiklyRenderView
 
     /** 消息事件回调 */
     private var onMessageCallback: KuiklyRenderCallback? = null
+
+    /** 触摸遮挡区域规格；在每次触摸时按当前 View 尺寸换算为 px rect */
+    private var touchShieldSpecs = emptyList<String>()
+
+    /** DOWN 命中 shield 的 pointer，后续 MOVE/UP/CANCEL 继续由 shield 消费 */
+    private val shieldPointers = SparseBooleanArray()
 
     init {
         addView(webView)
@@ -163,6 +173,18 @@ open class KRWebView(context: Context) : FrameLayout(context), IKuiklyRenderView
                 webViewClient.autoOpenExternalScheme = (propValue as? String) == "true"
                 true
             }
+            "touchShieldBottom" -> {
+                // 兼容旧版底部快捷写法
+                val heightDp = parseFloat(propValue)
+                setTouchShields(
+                    if (heightDp > 0f) listOf("4,0,0,0,$heightDp") else emptyList()
+                )
+                true
+            }
+            "touchShields" -> {
+                setTouchShields(parseShieldRects(propValue))
+                true
+            }
 
             // --- 事件回调 ---
             KuiklyWebViewEvent.EVENT_PAGE_STARTED -> {
@@ -273,7 +295,114 @@ open class KRWebView(context: Context) : FrameLayout(context), IKuiklyRenderView
         webView.webChromeClient = null
         webView.stopLoading()
         removeView(webView)
+        touchShieldSpecs = emptyList()
+        shieldPointers.clear()
         webView.destroy()
+    }
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (touchShieldSpecs.isNotEmpty() && handleShieldTouch(event)) {
+            return true
+        }
+        return super.dispatchTouchEvent(event)
+    }
+
+    private fun handleShieldTouch(event: MotionEvent): Boolean {
+        val rects = resolveShieldRects()
+        if (rects.isEmpty()) return false
+        val action = event.actionMasked
+        if (action == MotionEvent.ACTION_DOWN) {
+            shieldPointers.clear()
+        }
+
+        var consumed = false
+        for (index in 0 until event.pointerCount) {
+            val pointerId = event.getPointerId(index)
+            val isShieldPointer = shieldPointers.get(pointerId, false)
+            val inShield = rects.any { it.contains(event.getX(index), event.getY(index)) }
+
+            when {
+                action == MotionEvent.ACTION_DOWN ||
+                    action == MotionEvent.ACTION_POINTER_DOWN -> {
+                    if (inShield) {
+                        shieldPointers.put(pointerId, true)
+                        consumed = true
+                    }
+                }
+                isShieldPointer -> consumed = true
+                inShield && event.actionMasked != MotionEvent.ACTION_UP -> consumed = true
+            }
+
+            if (isShieldPointer &&
+                (action == MotionEvent.ACTION_UP ||
+                    action == MotionEvent.ACTION_POINTER_UP ||
+                    action == MotionEvent.ACTION_CANCEL)
+            ) {
+                shieldPointers.delete(pointerId)
+            }
+        }
+
+        if (action == MotionEvent.ACTION_UP ||
+            action == MotionEvent.ACTION_POINTER_UP ||
+            action == MotionEvent.ACTION_CANCEL
+        ) {
+            shieldPointers.clear()
+        }
+        return consumed
+    }
+
+    private fun setTouchShields(specs: List<String>) {
+        touchShieldSpecs = specs
+        shieldPointers.clear()
+    }
+
+    private fun resolveShieldRects(): List<RectF> {
+        val density = resources.displayMetrics.density
+        val viewWidth = width.toFloat()
+        val viewHeight = height.toFloat()
+        return touchShieldSpecs.mapNotNull {
+            parseShieldRect(it, density, viewWidth, viewHeight)
+        }
+    }
+
+    private fun parseShieldRect(
+        spec: String,
+        density: Float,
+        viewWidth: Float,
+        viewHeight: Float,
+    ): RectF? {
+        val parts = spec.split(',')
+        if (parts.size != 5) return null
+        val align = parts[0].toIntOrNull() ?: return null
+        val x = (parts[1].toFloatOrNull() ?: return null) * density
+        val y = (parts[2].toFloatOrNull() ?: return null) * density
+        val w = (parts[3].toFloatOrNull() ?: return null) * density
+        val h = (parts[4].toFloatOrNull() ?: return null) * density
+        if (w < 0f || h < 0f) return null
+
+        val rect = when (align) {
+            0 -> RectF(x, y, x + w, y + h)
+            1 -> RectF(viewWidth - x - w, y, viewWidth - x, y + h)
+            2 -> RectF(x, viewHeight - y - h, x + w, viewHeight - y)
+            3 -> RectF(viewWidth - x - w, viewHeight - y - h, viewWidth - x, viewHeight - y)
+            4 -> RectF(x, viewHeight - h, viewWidth - x, viewHeight)
+            5 -> RectF(x, 0f, viewWidth - x, h)
+            6 -> RectF(0f, y, w, viewHeight - y)
+            7 -> RectF(viewWidth - w, y, viewWidth, viewHeight - y)
+            else -> null
+        }
+        return rect?.takeIf { it.right > it.left && it.bottom > it.top }
+    }
+
+    private fun parseShieldRects(value: Any): List<String> = when (value) {
+        is String -> value.split('|').map { it.trim() }.filter { it.isNotEmpty() }
+        else -> emptyList()
+    }
+
+    private fun parseFloat(value: Any): Float = when (value) {
+        is Number -> value.toFloat()
+        is String -> value.toFloatOrNull() ?: 0f
+        else -> 0f
     }
 
     /**

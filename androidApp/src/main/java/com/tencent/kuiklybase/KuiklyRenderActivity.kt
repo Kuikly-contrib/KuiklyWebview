@@ -36,12 +36,12 @@ class KuiklyRenderActivity : Activity(), KuiklyRenderViewBaseDelegatorDelegate {
 
     private val pageName: String
         get() {
-            val pn = intent.getStringExtra(KEY_PAGE_NAME) ?: ""
-            return if (pn.isNotEmpty()) {
-                return pn
-            } else {
-                "router"
-            }
+            val explicitPageName = intent.getStringExtra(KEY_PAGE_NAME)
+                ?.takeIf { it.isNotEmpty() }
+                ?: intent.getStringExtra(KEY_PAGE_DATA)
+                    ?.let { JSONObject(it).optString(KEY_PAGE_NAME) }
+                    ?.takeIf { it.isNotEmpty() }
+            return explicitPageName ?: "router"
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {

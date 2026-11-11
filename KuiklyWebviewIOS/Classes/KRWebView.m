@@ -17,6 +17,8 @@ static dispatch_once_t _processPoolOnceToken;
 
 @property (nonatomic, strong, readwrite) WKWebView *webView;
 @property (nonatomic, strong, readwrite) KRWebViewJSBridge *jsBridge;
+@property (nonatomic, strong) NSMutableArray<UIView *> *touchShields;
+@property (nonatomic, copy) NSArray<NSString *> *shieldSpecs;
 
 // KVO 注册状态标记，避免 dealloc 中使用 @try/@catch（异常处理有栈展开开销）
 @property (nonatomic, assign) BOOL isObservingProgress;
@@ -95,6 +97,9 @@ static dispatch_once_t _processPoolOnceToken;
     self.webView.navigationDelegate = self;
     self.webView.UIDelegate = self;
     [self addSubview:self.webView];
+
+    self.touchShields = [NSMutableArray array];
+    self.shieldSpecs = @[];
 
     // 初始化 JSBridge
     __weak typeof(self) weakSelf = self;
@@ -217,6 +222,91 @@ static dispatch_once_t _processPoolOnceToken;
 
 - (void)setCss_autoOpenExternalScheme:(NSString *)flag {
     self.autoOpenExternalScheme = [flag isEqualToString:@"true"];
+}
+
+- (void)setCss_touchShieldBottom:(NSString *)height {
+    CGFloat heightPt = MAX(0.f, [height floatValue]);
+    if (heightPt <= 0.f) {
+        [self setCss_touchShields:@""];
+    } else {
+        [self setCss_touchShields:[NSString stringWithFormat:@"4,0,0,0,%@", @(heightPt)]];
+    }
+}
+
+- (void)setCss_touchShields:(NSString *)specs {
+    NSString *value = specs ?: @"";
+    NSArray<NSString *> *parts = [value componentsSeparatedByString:@"|"];
+    NSMutableArray<NSString *> *normalized = [NSMutableArray array];
+    for (NSString *part in parts) {
+        NSString *trimmed = [part stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmed.length > 0) [normalized addObject:trimmed];
+    }
+    if ([self.shieldSpecs isEqualToArray:normalized]) return;
+    self.shieldSpecs = [normalized copy];
+
+    for (UIView *shield in self.touchShields) {
+        [shield removeFromSuperview];
+    }
+    [self.touchShields removeAllObjects];
+
+    for (NSUInteger index = 0; index < self.shieldSpecs.count; index++) {
+        UIView *shield = [[UIView alloc] initWithFrame:CGRectZero];
+        shield.backgroundColor = UIColor.clearColor;
+        shield.hidden = YES;
+        shield.userInteractionEnabled = YES;
+        shield.accessibilityElementsHidden = YES;
+        UITapGestureRecognizer *tap =
+            [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(onTouchShieldTapped:)];
+        [shield addGestureRecognizer:tap];
+        [self addSubview:shield];
+        [self.touchShields addObject:shield];
+    }
+    [self setNeedsLayout];
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    self.webView.frame = self.bounds;
+    CGFloat width = CGRectGetWidth(self.bounds);
+    CGFloat height = CGRectGetHeight(self.bounds);
+    for (NSUInteger index = 0; index < self.touchShields.count; index++) {
+        UIView *shield = self.touchShields[index];
+        CGRect frame = [self shieldFrameFromSpec:self.shieldSpecs[index]
+                                       viewWidth:width
+                                      viewHeight:height];
+        shield.frame = frame;
+        shield.hidden = CGRectIsEmpty(frame);
+    }
+}
+
+- (CGRect)shieldFrameFromSpec:(NSString *)spec
+                    viewWidth:(CGFloat)viewWidth
+                   viewHeight:(CGFloat)viewHeight {
+    NSArray<NSString *> *parts = [spec componentsSeparatedByString:@","];
+    if (parts.count != 5) return CGRectZero;
+    NSInteger align = [parts[0] integerValue];
+    CGFloat x = [parts[1] floatValue];
+    CGFloat y = [parts[2] floatValue];
+    CGFloat w = [parts[3] floatValue];
+    CGFloat h = [parts[4] floatValue];
+    if (w < 0.f || h < 0.f) return CGRectZero;
+    CGRect frame = CGRectZero;
+    switch (align) {
+        case 0: frame = CGRectMake(x, y, w, h); break;
+        case 1: frame = CGRectMake(viewWidth - x - w, y, w, h); break;
+        case 2: frame = CGRectMake(x, viewHeight - y - h, w, h); break;
+        case 3: frame = CGRectMake(viewWidth - x - w, viewHeight - y - h, w, h); break;
+        case 4: frame = CGRectMake(x, viewHeight - h, viewWidth - 2 * x, h); break;
+        case 5: frame = CGRectMake(x, 0, viewWidth - 2 * x, h); break;
+        case 6: frame = CGRectMake(0, y, w, viewHeight - 2 * y); break;
+        case 7: frame = CGRectMake(viewWidth - w, y, w, viewHeight - 2 * y); break;
+        default: return CGRectZero;
+    }
+    return CGRectIsEmpty(frame) ? CGRectZero : frame;
+}
+
+- (void)onTouchShieldTapped:(UIGestureRecognizer *)sender {
+    // Intentionally empty: the native gesture only stops the touch from reaching WKWebView.
 }
 
 #pragma mark - CSS Methods (由 KUIKLY_CALL_CSS_METHOD 运行时分发)

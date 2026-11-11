@@ -35,7 +35,14 @@ android {
 
 dependencies {
     implementation(project(":shared"))
-    implementation("com.tencent.kuiklybase:KuiklyWebviewAndroid:1.0.2-2.0.21")
+    implementation(project(":KuiklyWebviewAndroid"))
+
+    configurations.all {
+        resolutionStrategy.dependencySubstitution {
+            substitute(module("com.tencent.kuiklybase:KuiklyWebview"))
+                .using(project(":KuiklyWebview"))
+        }
+    }
 
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("androidx.core:core-ktx:1.13.1")

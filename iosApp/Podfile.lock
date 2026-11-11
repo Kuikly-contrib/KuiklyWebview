@@ -1,7 +1,7 @@
 PODS:
-  - KuiklyWebviewIOS (1.0.0):
-    - OpenKuiklyIOSRender (~> 2.7.0)
-  - OpenKuiklyIOSRender (2.7.0)
+  - KuiklyWebviewIOS (1.0.4):
+    - OpenKuiklyIOSRender (>= 2.30.0)
+  - OpenKuiklyIOSRender (2.30.0)
   - SDWebImage (5.21.7):
     - SDWebImage/Core (= 5.21.7)
   - SDWebImage/Core (5.21.7)
@@ -9,7 +9,7 @@ PODS:
 
 DEPENDENCIES:
   - KuiklyWebviewIOS (from `../KuiklyWebviewIOS`)
-  - OpenKuiklyIOSRender (~> 2.7.0)
+  - OpenKuiklyIOSRender (= 2.30.0)
   - SDWebImage
   - shared (from `../shared`)
 
@@ -25,11 +25,11 @@ EXTERNAL SOURCES:
     :path: "../shared"
 
 SPEC CHECKSUMS:
-  KuiklyWebviewIOS: a3568d4e041c843b05778f3c42bfd2e6167732ba
-  OpenKuiklyIOSRender: 2e6f7be3adae40f8167bb56a3e6803d1b18fd16e
+  KuiklyWebviewIOS: f8872119a86354fdf6cb2d50f326f6c454288f49
+  OpenKuiklyIOSRender: 9fa6e2bf0c24bb253b5876691d8d0158749f70a8
   SDWebImage: e9fc87c1aab89a8ab1bbd74eba378c6f53be8abf
   shared: 45c4d5a3fe6bf89e105d0ff0f3587f64ad21dd48
 
-PODFILE CHECKSUM: ff83b4eb0e191abc488290215c197dc98314cdc3
+PODFILE CHECKSUM: bcaae5da9d5b75ca67cf14533ec7ae3cf0bd0957
 
 COCOAPODS: 1.16.2

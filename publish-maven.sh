@@ -37,7 +37,7 @@ GROUP_ID=""
 MAVEN_URL="${mavenUrl:-}"
 
 # Maven 认证（从 gradle.properties 读取，也可通过环境变量传入）
-MAVEN_USERNAME="${mavenUserName:-}"
+MAVEN_USERNAME="${mavenUsername:-${mavenUserName:-}}"
 MAVEN_PASSWORD="${mavenPassword:-}"
 
 # Kotlin 版本列表（从 gradle.properties 读取，可通过 -k 参数覆盖）
@@ -46,10 +46,11 @@ KOTLIN_VERSION_LIST=""
 OHOS_KOTLIN_VERSION_LIST=""
 
 # 默认 Kuikly Core 版本
-DEFAULT_KUIKLY_CORE_VERSION="2.7.0"
+DEFAULT_KUIKLY_CORE_VERSION="2.30.0"
 
 # publish 任务
 PUBLISH_TASK=publishAllPublicationsToMavenRepository
+LOCAL_PUBLISH_TASK=publishToMavenLocal
 
 # 跨端模块目录名
 MODULE_KMP="KuiklyWebview"
@@ -59,6 +60,7 @@ MODULE_ANDROID="KuiklyWebviewAndroid"
 
 # Android 模块发布任务（afterEvaluate + singleVariant("release")）
 ANDROID_PUBLISH_TASK="publishReleasePublicationToMavenRepository"
+ANDROID_LOCAL_PUBLISH_TASK="publishReleasePublicationToMavenLocal"
 
 # 构建开始时间
 BUILD_START_TIME=0
@@ -131,6 +133,7 @@ function usage() {
   echo "  -ok, --ohos-kotlin  指定鸿蒙 Kotlin 版本列表, 使用 , 分割, 默认读取 gradle.properties 中 OHOS_KOTLIN_VERSION_LIST"
   echo "  -s, --snapshot      指定是否 SNAPSHOT (true/false)"
   echo "  -l, --local-repo    指定是否发布到本地 repo (true/false)"
+  echo "  -local-only         仅发布到 ~/.m2/repository，不执行任何 MavenRepository 上传任务"
   echo "  -m, --maven-url     指定 Maven 仓库地址, 默认读取 gradle.properties 中 MAVEN_REPO_URL"
   echo "  -c, --clean         指定是否需要 clean 后编译 (true/false)"
   echo "  -d, --debug         是否开启 Gradle debug 模式 (true/false)"
@@ -138,7 +141,7 @@ function usage() {
   echo ""
   echo " 环境变量 (优先级高于 gradle.properties，低于命令行参数):"
   echo "  mavenUrl            Maven 仓库地址"
-  echo "  mavenUserName       Maven 认证用户名"
+  echo "  mavenUsername       Maven 认证用户名（兼容 mavenUserName）"
   echo "  mavenPassword       Maven 认证密码"
   echo ""
 }
@@ -265,7 +268,7 @@ function publishModule() {
   export kuiklyBizVersion="${build_version}"
 
   log_info "发布 ${project} (kotlin=${kt_version}, version=${build_version}, ohos=${enable_ohos})"
-  echo "> [build] ${GRADLEW} :${project}:${task} ${settings_flag} -PkotlinVersion=${kt_version} -PkuiklyCoreVersion=${core_version} -PHARMONY_ENABLED=${harmony_flag} -PMAVEN_VERSION=${build_version} ${common_args}"
+  log_info "执行 Gradle 发布任务（认证参数不回显）"
 
   if ! ${GRADLEW} :${project}:${task} ${settings_flag} \
     -PkotlinVersion="${kt_version}" \
@@ -283,6 +286,13 @@ function publishModule() {
 function publishAll() {
   local final_versions=""
   local build_version
+  local kmp_task="${PUBLISH_TASK}"
+  local android_task="${ANDROID_PUBLISH_TASK}"
+
+  if [[ "${PUB_IS_LOCAL_REPO}" == 'true' ]]; then
+    kmp_task="${LOCAL_PUBLISH_TASK}"
+    android_task="${ANDROID_LOCAL_PUBLISH_TASK}"
+  fi
 
   # ====== 标准平台 (Android + iOS + JS) ======
   log_info "========== 开始发布标准平台产物 =========="
@@ -295,12 +305,12 @@ function publishAll() {
     fi
 
     # 发布跨端模块 (KuiklyWebview)
-    if ! publishModule "${MODULE_KMP}" "${PUBLISH_TASK}" "${kt_version}" "${build_version}" "false"; then
+    if ! publishModule "${MODULE_KMP}" "${kmp_task}" "${kt_version}" "${build_version}" "false"; then
       return 1
     fi
 
     # 发布 Android 原生模块 (KuiklyWebviewAndroid)
-    if ! publishModule "${MODULE_ANDROID}" "${ANDROID_PUBLISH_TASK}" "${kt_version}" "${build_version}" "false"; then
+    if ! publishModule "${MODULE_ANDROID}" "${android_task}" "${kt_version}" "${build_version}" "false"; then
       return 1
     fi
 
@@ -323,7 +333,7 @@ function publishAll() {
       fi
 
       # 鸿蒙只需发布跨端模块（Android 原生模块不涉及鸿蒙）
-      if ! publishModule "${MODULE_KMP}" "${PUBLISH_TASK}" "${kt_version}" "${build_version}" "true"; then
+      if ! publishModule "${MODULE_KMP}" "${kmp_task}" "${kt_version}" "${build_version}" "true"; then
         return 1
       fi
 
@@ -381,6 +391,9 @@ while [[ "$#" -gt 0 ]]; do
   -l | --local-repo)
     shift
     PUB_IS_LOCAL_REPO="$1"
+    ;;
+  -local-only)
+    PUB_IS_LOCAL_REPO="true"
     ;;
   -m | --maven-url)
     shift

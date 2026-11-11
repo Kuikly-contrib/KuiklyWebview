@@ -18,7 +18,7 @@ import com.tencent.kuikly.core.layout.FlexDirection
  * WebView 功能演示页面
  * 展示 KuiklyWebView 组件的 URL 加载、JS 执行、JSBridge、URL 拦截等功能
  */
-@Page("router", supportInLocal = true)
+@Page("111", supportInLocal = true)
 internal class WebViewDemoPage : BasePager() {
 
     /** 当前加载的 URL */

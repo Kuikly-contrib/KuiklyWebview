@@ -3,6 +3,13 @@ import { ComponentContent } from '@kit.ArkUI';
 import { webview } from '@kit.ArkWeb';
 import { KRWebViewJSBridge, JSProxyObject } from './KRWebViewJSBridge';
 
+interface TouchShieldLayout {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 /**
  * javaScriptProxy 配置接口
  */
@@ -49,6 +56,12 @@ export class KRWebView extends KuiklyRenderBaseView {
   // 该字段目前仅用于对齐 API（OHOS Web 组件本身不具备直接唤起第三方应用的能力），
   // 行为差异详见 README。
   cssAutoOpenExternalScheme: boolean = false;
+  // 触摸遮挡区域规格：align,x,y,width,height；多个区域以 | 分隔
+  cssTouchShields: string[] = [];
+  // 解析后的 vp 布局；由 onAreaChange 刷新
+  cssTouchShieldLayouts: TouchShieldLayout[] = [];
+  // 兼容旧版底部快捷写法
+  cssTouchShieldBottom: number = 0;
 
   // 事件回调
   onPageStartedCallback: KuiklyRenderCallback | null = null;
@@ -269,6 +282,14 @@ export class KRWebView extends KuiklyRenderBaseView {
         this.cssAutoOpenExternalScheme = (propValue as string) === 'true';
         return true;
 
+      case 'touchShieldBottom':
+        this.setTouchShieldBottom(Number.parseFloat(propValue as string) || 0);
+        return true;
+
+      case 'touchShields':
+        this.setTouchShields(propValue as string);
+        return true;
+
       // 事件回调
       case 'onPageStarted':
         this.onPageStartedCallback = propValue as KuiklyRenderCallback;
@@ -450,6 +471,69 @@ export class KRWebView extends KuiklyRenderBaseView {
     this.onProgressChangedCallback = null;
     this.onMessageCallback = null;
     this.onShouldOverrideUrlLoadingCallback = null;
+    this.cssTouchShields = [];
+    this.cssTouchShieldLayouts = [];
+    this.cssTouchShieldBottom = 0;
+  }
+
+  /** 兼容底部快捷写法 */
+  setTouchShieldBottom(height: number): void {
+    const value = Math.max(0, height);
+    this.cssTouchShieldBottom = value;
+    this.setTouchShields(value > 0 ? `4,0,0,0,${value}` : '');
+  }
+
+  /** 运行时替换所有遮挡区域 */
+  setTouchShields(specs: string): void {
+    this.cssTouchShields = specs
+      .split('|')
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+    this.cssTouchShieldLayouts = this.resolveTouchShieldLayouts(0, 0);
+  }
+
+  /** 容器尺寸变化时重新计算所有 stretch 区域 */
+  onAreaChanged(width: number, height: number): void {
+    this.cssTouchShieldLayouts = this.resolveTouchShieldLayouts(width, height);
+  }
+
+  private resolveTouchShieldLayouts(viewWidth: number, viewHeight: number): TouchShieldLayout[] {
+    const layouts: Array<TouchShieldLayout | null> = this.cssTouchShields
+      .map((spec) => this.parseTouchShieldLayout(spec, viewWidth, viewHeight))
+      .filter((layout) => layout !== null) as Array<TouchShieldLayout | null>;
+    const result: TouchShieldLayout[] = [];
+    layouts.forEach((layout) => {
+      if (layout !== null) {
+        result.push(layout);
+      }
+    });
+    return result;
+  }
+
+  /** 将跨端区域规格解析为 ArkUI 左上角坐标和尺寸（vp） */
+  parseTouchShieldLayout(spec: string, viewWidth: number, viewHeight: number): TouchShieldLayout | null {
+    const parts = spec.split(',');
+    if (parts.length !== 5) return null;
+    const align = Number.parseInt(parts[0], 10);
+    const x = Number.parseFloat(parts[1]) || 0;
+    const y = Number.parseFloat(parts[2]) || 0;
+    const w = Number.parseFloat(parts[3]) || 0;
+    const h = Number.parseFloat(parts[4]) || 0;
+    if (w < 0 || h < 0) return null;
+
+    let layout: TouchShieldLayout;
+    switch (align) {
+      case 0: layout = { x, y, width: w, height: h }; break;
+      case 1: layout = { x: viewWidth - x - w, y, width: w, height: h }; break;
+      case 2: layout = { x, y: viewHeight - y - h, width: w, height: h }; break;
+      case 3: layout = { x: viewWidth - x - w, y: viewHeight - y - h, width: w, height: h }; break;
+      case 4: layout = { x, y: viewHeight - h, width: Math.max(0, viewWidth - 2 * x), height: h }; break;
+      case 5: layout = { x, y: 0, width: Math.max(0, viewWidth - 2 * x), height: h }; break;
+      case 6: layout = { x: 0, y, width: w, height: Math.max(0, viewHeight - 2 * y) }; break;
+      case 7: layout = { x: viewWidth - w, y, width: w, height: Math.max(0, viewHeight - 2 * y) }; break;
+      default: return null;
+    }
+    return layout.width > 0 && layout.height > 0 ? layout : null;
   }
 
   /**
@@ -509,87 +593,102 @@ struct KRWebViewComponent {
   @ObjectLink renderView: KRWebView;
 
   build() {
-    Web({
-      src: '',
-      controller: this.renderView.controller
-    })
-      .javaScriptAccess(this.renderView.cssJavaScriptEnabled)
-      .domStorageAccess(this.renderView.cssDomStorageEnabled)
-      .javaScriptProxy(this.renderView.getJavaScriptProxyConfig())
-      .onControllerAttached(() => {
-        this.renderView.onWebControllerReady();
+    Stack() {
+      Web({
+        src: '',
+        controller: this.renderView.controller
       })
-      .onLoadIntercept((event) => {
-        // 同步拦截：基于 attr 下发的规则匹配，命中则 cancel 加载并上抛事件
-        // 不命中或事件回调缺失则放行
-        const req = event?.data;
-        if (!req) return false;
-        let url = '';
-        try {
-          url = req.getRequestUrl() ?? '';
-        } catch (e) {
-          return false;
-        }
-        const isMainFrame = req.isMainFrame ? req.isMainFrame() : true;
-        if (!url || url.length === 0) return false;
+        .javaScriptAccess(this.renderView.cssJavaScriptEnabled)
+        .domStorageAccess(this.renderView.cssDomStorageEnabled)
+        .javaScriptProxy(this.renderView.getJavaScriptProxyConfig())
+        .onControllerAttached(() => {
+          this.renderView.onWebControllerReady();
+        })
+        .onLoadIntercept((event) => {
+          // 同步拦截：基于 attr 下发的规则匹配，命中则 cancel 加载并上抛事件
+          const req = event?.data;
+          if (!req) return false;
+          let url = '';
+          try {
+            url = req.getRequestUrl() ?? '';
+          } catch (e) {
+            return false;
+          }
+          const isMainFrame = req.isMainFrame ? req.isMainFrame() : true;
+          if (!url || url.length === 0) return false;
 
-        const parsed = this.renderView.parseSchemeAndHost(url);
-        const scheme = parsed[0];
-        const host = parsed[1];
+          const parsed = this.renderView.parseSchemeAndHost(url);
+          const scheme = parsed[0];
+          const host = parsed[1];
 
-        const schemeHit = scheme.length > 0 && this.renderView.cssUrlInterceptSchemes.has(scheme);
-        const hostHit = isMainFrame && host.length > 0 && this.renderView.matchHost(host);
-        if (schemeHit || hostHit) {
+          const schemeHit = scheme.length > 0 && this.renderView.cssUrlInterceptSchemes.has(scheme);
+          const hostHit = isMainFrame && host.length > 0 && this.renderView.matchHost(host);
+          if (schemeHit || hostHit) {
+            this.renderView.notifyShouldOverride(url, isMainFrame, 'navigation');
+            return true;
+          }
+
+          const isStandard = scheme === 'http' || scheme === 'https' || scheme === 'about' || scheme === 'file';
+          if (isStandard) {
+            if (this.renderView.cssReportAllNavigation && isMainFrame) {
+              this.renderView.notifyShouldOverride(url, isMainFrame, 'navigation');
+            }
+            return false;
+          }
+
           this.renderView.notifyShouldOverride(url, isMainFrame, 'navigation');
           return true;
-        }
-
-        // 标准 scheme 放行；按需上抛感知事件
-        const isStandard = scheme === 'http' || scheme === 'https' || scheme === 'about' || scheme === 'file';
-        if (isStandard) {
-          if (this.renderView.cssReportAllNavigation && isMainFrame) {
-            this.renderView.notifyShouldOverride(url, isMainFrame, 'navigation');
+        })
+        .onPageBegin((event) => {
+          if (this.renderView.onPageStartedCallback) {
+            this.renderView.onPageStartedCallback({ 'url': event?.url ?? '' });
           }
-          return false;
-        }
+        })
+        .onPageEnd((event) => {
+          this.renderView.jsBridge?.injectBridgeScript();
+          if (this.renderView.onPageFinishedCallback) {
+            this.renderView.onPageFinishedCallback({ 'url': event?.url ?? '' });
+          }
+        })
+        .onErrorReceive((event) => {
+          if (this.renderView.onErrorCallback) {
+            const error = event?.error;
+            this.renderView.onErrorCallback({
+              'errorCode': error?.getErrorCode() ?? -1,
+              'description': error?.getErrorInfo() ?? 'Unknown error'
+            });
+          }
+        })
+        .onProgressChange((event) => {
+          if (this.renderView.onProgressChangedCallback) {
+            this.renderView.onProgressChangedCallback({ 'progress': event?.newProgress ?? 0 });
+          }
+        })
+        .onTitleReceive((event) => {
+          if (this.renderView.onReceiveTitleCallback) {
+            this.renderView.onReceiveTitleCallback({ 'title': event?.title ?? '' });
+          }
+        })
+        .width('100%')
+        .height('100%')
 
-        // 非标准 scheme 且未命中规则：上抛事件 + cancel。OHOS Web 组件本身不具备唤起第三方应用
-        // 的能力，业务需在 onShouldOverrideUrlLoading 里自行调用原生桥实现唤起。
-        this.renderView.notifyShouldOverride(url, isMainFrame, 'navigation');
-        return true;
-      })
-      .onPageBegin((event) => {
-        if (this.renderView.onPageStartedCallback) {
-          this.renderView.onPageStartedCallback({ 'url': event?.url ?? '' });
-        }
-      })
-      .onPageEnd((event) => {
-        // 页面加载完成后注入 JSBridge 脚本
-        this.renderView.jsBridge?.injectBridgeScript();
-        if (this.renderView.onPageFinishedCallback) {
-          this.renderView.onPageFinishedCallback({ 'url': event?.url ?? '' });
-        }
-      })
-      .onErrorReceive((event) => {
-        if (this.renderView.onErrorCallback) {
-          const error = event?.error;
-          this.renderView.onErrorCallback({
-            'errorCode': error?.getErrorCode() ?? -1,
-            'description': error?.getErrorInfo() ?? 'Unknown error'
-          });
-        }
-      })
-      .onProgressChange((event) => {
-        if (this.renderView.onProgressChangedCallback) {
-          this.renderView.onProgressChangedCallback({ 'progress': event?.newProgress ?? 0 });
-        }
-      })
-      .onTitleReceive((event) => {
-        if (this.renderView.onReceiveTitleCallback) {
-          this.renderView.onReceiveTitleCallback({ 'title': event?.title ?? '' });
-        }
-      })
-      .width('100%')
-      .height('100%')
+      ForEach(this.renderView.cssTouchShieldLayouts, (layout: TouchShieldLayout) => {
+        Stack()
+          .width(layout.width)
+          .height(layout.height)
+          .position({ x: layout.x, y: layout.y })
+          .onTouch((event: TouchEvent) => {
+            event.stopPropagation();
+          })
+          .accessibilityLevel('no')
+      }, (layout: TouchShieldLayout) => `${layout.x},${layout.y},${layout.width},${layout.height}`)
+    }
+    .width('100%')
+    .height('100%')
+    .onAreaChange((_: Area, newValue: Area) => {
+      const width = Number(newValue.width ?? 0);
+      const height = Number(newValue.height ?? 0);
+      this.renderView.onAreaChanged(width, height);
+    })
   }
 }

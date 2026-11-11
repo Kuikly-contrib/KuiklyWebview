@@ -23,6 +23,7 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "KuiklyWebview"
+
 include(":androidApp")
 include(":shared")
 include(":KuiklyWebview")
